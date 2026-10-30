@@ -1,0 +1,7 @@
+# 独立站点示例；替换域名后合并到现有配置，不直接覆盖已有站点。
+time.example.com {
+    # 去除公开路径前缀后转发至仅监听回环地址的同步服务。
+    handle_path /lyushi-api/* {
+        reverse_proxy 127.0.0.1:8093
+    }
+}

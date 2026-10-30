@@ -1,0 +1,30 @@
+# 正式服务使用独立低权限用户，公网访问由现有 Caddy 提供。
+[Unit]
+Description=Lyushi personal time sync
+After=network.target
+
+[Service]
+Type=simple
+User=lyushi
+Group=lyushi
+ExecStart=/opt/lyushi/lyushi-server --db /var/lib/lyushi/sync.sqlite --listen 127.0.0.1:8093
+Restart=on-failure
+RestartSec=3
+StateDirectory=lyushi
+StateDirectoryMode=0700
+UMask=0077
+Environment=GOMEMLIMIT=96MiB
+Environment=GOMAXPROCS=2
+MemoryMax=192M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

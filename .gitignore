@@ -1,0 +1,31 @@
+# 本机工具、凭证、业务数据和生成产物不得进入公开源码。
+.tools/
+.secrets/
+build/
+dist/
+validation/
+**/.gradle/
+**/.kotlin/
+**/build/
+**/local.properties
+**/.idea/
+*.user
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.key
+*.pem
+*.jks
+*.keystore
+.env
+.env.*
+!*.example
+
+# 旧过程文件尚留在工作目录，但不属于公开项目；禁止批量提交时带入。
+docs/[0-9][0-9]-*.md
+deploy/install-first.sh
+deploy/activate-production.sh
+deploy/check-loopback.py
+deploy/check-production.py
+scripts/check-linux-isolated.sh
