@@ -1,6 +1,6 @@
 # 桌面应用只使用系统窗口与 SQLite；Windows 和 Ubuntu 共用此构建入口。
 cmake_minimum_required(VERSION 3.22)
-project(Lyushi VERSION 0.3.1 LANGUAGES CXX)
+project(Lyushi VERSION 0.4.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Sql Network)

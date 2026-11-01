@@ -88,20 +88,42 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
         entities("record").filter { it.getString("ledgerId") == id }.forEach { save("record", it.put("deleted", true)) }
         save("ledger", ledger.put("deleted", true))
     }
-    fun start(ledgerId: String, task: String) = transaction {
+    /** 与桌面端按修剪后名称的 UTF-8 字节生成相同身份，防止多端同名标签重复。 */
+    fun addTag(name: String): String = transaction {
+        idle(); val text = name.trim(); check(text.isNotEmpty() && text.length <= 200) { "请输入不超过 200 字的标签" }
+        val id = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        val previous = find("tag", id)
+        if (previous == null || previous.getBoolean("deleted")) save("tag", JSONObject().put("id", id).put("name", text).put("deleted", false).put("revision", 1))
+        text
+    }
+    /** 删除只影响候选列表；记录中的历史标签快照保持不变。 */
+    fun deleteTag(name: String) = transaction {
+        idle(); val matches = entities("tag").filter { it.getString("name") == name }
+        check(matches.isNotEmpty()) { "标签已被删除，请重新选择" }
+        matches.forEach { save("tag", it.put("deleted", true)) }
+    }
+    fun start(ledgerId: String, task: String, tag: String = "") = transaction {
         idle(); val ledger = checkNotNull(find("ledger", ledgerId)) { "请先选择账本" }; check(!ledger.getBoolean("deleted"))
         check(task.isNotBlank() && task.length <= 10000) { "请输入不超过一万字的事项" }
-        save("record", JSONObject().put("id", UUID.randomUUID().toString()).put("ledgerId", ledgerId).put("task", task.trim())
-            .put("started", System.currentTimeMillis()).put("ended", JSONObject.NULL).put("deleted", false).put("revision", 1))
+        check(tag.isEmpty() || entities("tag").any { it.getString("name") == tag }) { "标签已被删除，请重新选择" }
+        val record = JSONObject().put("id", UUID.randomUUID().toString()).put("ledgerId", ledgerId).put("task", task.trim())
+            .put("started", System.currentTimeMillis()).put("ended", JSONObject.NULL).put("deleted", false).put("revision", 1)
+        if (tag.isNotEmpty()) record.put("tag", tag)
+        save("record", record)
     }
     fun finish(ended: Long = System.currentTimeMillis()) = transaction {
         val record = checkNotNull(active()) { "没有进行中的记录" }; record.put("ended", ended); validateRecord(record); save("record", record)
     }
-    fun edit(id: String?, ledgerId: String, task: String, started: Long, ended: Long, expectedVersion: String? = null) = transaction {
+    fun edit(id: String?, ledgerId: String, task: String, started: Long, ended: Long, expectedVersion: String? = null, tag: String? = null) = transaction {
         idle(); val ledger = checkNotNull(find("ledger", ledgerId)); check(!ledger.getBoolean("deleted"))
         val record = if (id == null) JSONObject().put("id", UUID.randomUUID().toString()).put("deleted", false).put("revision", 1)
             else checkNotNull(find("record", id)) { "记录不存在" }.also { check(!it.getBoolean("deleted") && it.getString("ledgerId") == ledgerId) }
         check(expectedVersion.isNullOrEmpty() || record.optString("version") == expectedVersion) { "记录已被另一设备更新，请保留输入并重新打开修改" }
+        // 空参数表示旧调用保留标签；空字符串表示用户明确选择“无标签”。
+        if (tag != null) {
+            check(tag.isEmpty() || record.optString("tag") == tag || entities("tag").any { it.getString("name") == tag }) { "标签已被删除，请重新选择" }
+            if (tag.isEmpty()) record.remove("tag") else record.put("tag", tag)
+        }
         record.put("ledgerId", ledgerId).put("task", task.trim()).put("started", started).put("ended", ended)
         validateRecord(record); save("record", record)
     }
@@ -112,7 +134,7 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
     /** 状态栏只判断是否存在冲突，不在每秒刷新时读取全部存档。 */
     fun hasConflicts(): Boolean = readableDatabase.rawQuery("SELECT 1 FROM conflicts LIMIT 1",null).use { it.moveToFirst() }
     fun backup(): JSONObject {
-        idle(); return JSONObject().put("format", "lyushi.backup").put("formatVersion", 1).put("ledgers", JSONArray(entities("ledger", true)))
+        idle(); return JSONObject().put("format", "lyushi.backup").put("formatVersion", 2).put("tags", JSONArray(entities("tag", true))).put("ledgers", JSONArray(entities("ledger", true)))
             .put("records", JSONArray(entities("record", true))).put("conflicts", JSONArray(conflicts()))
     }
     /** 输入必须是整数 JSON 数值，不能用字符串、布尔或浮点时间冒充。 */
@@ -126,13 +148,14 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
     }
     /** 严格识别协议字段，避免接受服务器无法处理的扩展字段并卡住上传队列。 */
     private fun onlyFields(entity: JSONObject, allowed: Set<String>) { check(entity.keys().asSequence().all { it in allowed }) { "备份包含当前版本不支持的字段" } }
-    private fun validateLedger(entity: JSONObject) {
+    internal fun validateLedger(entity: JSONObject) {
         validateEntity(entity); onlyFields(entity,setOf("id","name","deleted","revision","version"))
         check(entity.get("name") is String && entity.getString("name").isNotBlank() && entity.getString("name").length <= 200) { "账本名称无效" }
     }
-    private fun validateRecord(entity: JSONObject, allowRunning: Boolean = false) {
+    internal fun validateRecord(entity: JSONObject, allowRunning: Boolean = false) {
         validateEntity(entity)
-        onlyFields(entity,setOf("id","ledgerId","task","started","ended","deleted","revision","version"))
+        onlyFields(entity,setOf("id","ledgerId","task","started","ended","deleted","revision","version","tag"))
+        check(!entity.has("tag") || (entity.get("tag") is String && entity.getString("tag").isNotBlank() && entity.getString("tag").length <= 200)) { "任务标签无效" }
         check(entity.get("task") is String && entity.getString("task").isNotBlank() && entity.getString("task").length <= 10000) { "事项不能为空，且不能超过一万字" }
         check(entity.get("ledgerId") is String && entity.getString("ledgerId").length in 1..128) { "记录缺少有效账本编号" }
         val start = integer(entity, "started")
@@ -142,14 +165,17 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
     }
     /** 整批校验与合并使用同一事务；冲突另存并参与备份，绝不以旧内容覆盖当前版本。 */
     fun importBackup(data: JSONObject): JSONObject = transaction {
-        idle(); check(data.getString("format") == "lyushi.backup" && integer(data, "formatVersion") == 1L) { "不支持的备份格式" }
+        idle(); check(data.getString("format") == "lyushi.backup" && (integer(data, "formatVersion") == 1L || (integer(data, "formatVersion") == 2L && data.opt("tags") is JSONArray))) { "不支持的备份格式" }
         val ledgers = data.getJSONArray("ledgers").objects(); val records = data.getJSONArray("records").objects()
         val ledgerIds = mutableSetOf<String>(); val recordIds = mutableSetOf<String>()
         ledgers.forEach { validateLedger(it); check(ledgerIds.add(it.getString("id"))) { "重复账本编号" } }
         records.forEach { validateRecord(it); check(it.getString("ledgerId") in ledgerIds) { "记录缺少所属账本" }; check(recordIds.add(it.getString("id"))) { "重复记录编号" } }
+        val tags = data.optJSONArray("tags")?.objects() ?: emptyList()
+        val tagIds = mutableSetOf<String>()
+        tags.forEach { validateLedger(it); check(tagIds.add(it.getString("id"))) { "重复标签编号" } }
         var added = 0; var duplicate = 0; var conflictCount = 0
         fun preserve(kind: String, entity: JSONObject, archived: Boolean = false) {
-            check(kind == "record" || kind == "ledger") { "冲突类型无效" }
+            check(kind == "record" || kind == "ledger" || kind == "tag") { "冲突类型无效" }
             if (kind == "record") validateRecord(entity, archived) else validateLedger(entity)
             val wrapped = JSONObject().put("kind", kind).put("entity", entity).put("archived", true)
             val payload = canonical(wrapped)
@@ -159,7 +185,7 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
             }, SQLiteDatabase.CONFLICT_IGNORE)
             if (result != -1L) { conflictCount++; queueArchive(writableDatabase,wrapped) }
         }
-        listOf("ledger" to ledgers, "record" to records).forEach { (kind, items) -> items.forEach { entity ->
+        listOf("tag" to tags, "ledger" to ledgers, "record" to records).forEach { (kind, items) -> items.forEach { entity ->
             val local = find(kind, entity.getString("id"))
             val deletedParent = kind == "record" && find("ledger", entity.getString("ledgerId"))?.getBoolean("deleted") == true && !entity.getBoolean("deleted")
             fun content(item: JSONObject) = JSONObject(item.toString()).apply { remove("version"); remove("revision") }
@@ -175,11 +201,11 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
         idle()
         fun quote(value: String): String { val safe = if (value.firstOrNull() in listOf('=', '+', '-', '@', '\t', '\r')) "'$value" else value; return "\"${safe.replace("\"", "\"\"")}\"" }
         return buildString {
-            append("\uFEFF账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号\r\n")
+            append("\uFEFF账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号,标签\r\n")
             entities("record").filter { ledgerId == null || it.getString("ledgerId") == ledgerId }.forEach { record ->
                 val ledger = checkNotNull(find("ledger", record.getString("ledgerId")))
                 if (!ledger.getBoolean("deleted")) append(listOf(ledger.getString("name"), record.getString("task"), dateText(record.getLong("started"), true),
-                    dateText(record.getLong("ended"), true), java.lang.String.format(java.util.Locale.ROOT, "%.3f", (record.getLong("ended") - record.getLong("started")) / 1000.0), record.getString("id")).joinToString(",") { quote(it) } + "\r\n")
+                    dateText(record.getLong("ended"), true), java.lang.String.format(java.util.Locale.ROOT, "%.3f", (record.getLong("ended") - record.getLong("started")) / 1000.0), record.getString("id"), record.optString("tag")).joinToString(",") { quote(it) } + "\r\n")
             }
         }
     }

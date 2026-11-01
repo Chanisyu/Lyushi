@@ -1,4 +1,5 @@
-# 正式服务使用独立低权限用户，公网访问由现有 Caddy 提供。
+# 正式服务使用独立低权限用户；0.4.0 标签同步要求客户端声明协议能力 2。
+# 公网访问由 Caddy 提供，服务地址及数据目录保持兼容，无需重建数据库。
 [Unit]
 Description=Lyushi personal time sync
 After=network.target

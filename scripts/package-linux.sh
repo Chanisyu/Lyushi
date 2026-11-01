@@ -4,7 +4,7 @@
 set -euo pipefail
 project_dir=$(cd -- "$(dirname -- "$0")/.." && pwd)
 build_dir="$project_dir/build/desktop-linux"
-version=0.3.1
+version=0.4.0
 arch=$(dpkg --print-architecture)
 cmake -S "$project_dir/apps/desktop" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build "$build_dir" --parallel 2

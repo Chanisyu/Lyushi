@@ -26,11 +26,13 @@ internal fun syncBlocking(store: Store, address: String, key: String): Boolean {
         try {
             connection.requestMethod = "POST"; connection.instanceFollowRedirects = false
             connection.connectTimeout = 10000; connection.readTimeout = 15000
+            // 明确声明标签能力，服务器拒绝不具备该能力的旧版本写入。
+            connection.setRequestProperty("X-Lyushi-Protocol", "2")
             connection.setRequestProperty("Authorization", "Bearer $key"); connection.setRequestProperty("Content-Type", "application/json")
             connection.doOutput = true; val bytes = canonical(request).toByteArray(Charsets.UTF_8); connection.setFixedLengthStreamingMode(bytes.size)
             connection.outputStream.use { it.write(bytes) }
             val code = connection.responseCode
-            check(code == 200) { when (code) { 401 -> "设备密钥无效或已撤销"; 409 -> "同步未提交，请核对服务器身份和数据版本"; else -> "本机已保存，等待重连" } }
+            check(code == 200) { when (code) { 401 -> "设备密钥无效或已撤销"; 426 -> "服务器要求升级至 0.4.0 或更新版本"; 409 -> "同步未提交，请核对服务器身份和数据版本"; else -> "本机已保存，等待重连" } }
             val response = connection.inputStream.use { input ->
                 val output = ByteArrayOutputStream(); val chunk = ByteArray(8192)
                 while (true) { val count = input.read(chunk); if (count < 0) break; check(output.size() + count <= 8 * 1024 * 1024) { "同步响应过大" }; output.write(chunk, 0, count) }

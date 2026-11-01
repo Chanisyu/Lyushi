@@ -175,6 +175,7 @@ func TestPaginationAndAuthentication(t *testing.T) {
 	serve := func(token string) int {
 		r := httptest.NewRequest(http.MethodPost, "/v1/sync", bytes.NewReader(body))
 		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("X-Lyushi-Protocol", "2")
 		w := httptest.NewRecorder()
 		s.handler().ServeHTTP(w, r)
 		return w.Code

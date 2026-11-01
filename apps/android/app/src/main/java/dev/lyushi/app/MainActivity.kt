@@ -31,6 +31,8 @@ class MainActivity : Activity() {
     private lateinit var elapsed: TextView
     private lateinit var action: Button
     private lateinit var ledgerSpinner: Spinner
+    private lateinit var tagSpinner: Spinner
+    private var selectedTag = ""
     private lateinit var status: TextView
     private lateinit var sync: SyncClient
     private val dialogs = mutableListOf<AlertDialog>()
@@ -57,7 +59,12 @@ class MainActivity : Activity() {
         store = Store(this); selected = preferences.getString("ledger", "") ?: ""; fileMode = savedInstanceState?.getInt("fileMode") ?: 0
         sync = SyncClient(applicationContext, store, preferences, worker, handler) { changed, reconnected ->
             if (!isDestroyed) safely {
-                if (changed && !busy) { if (store.active() != null) dialogs.toList().forEach { it.dismiss() }; showMain() }
+                if (changed && !busy) {
+                    // 远端仅改变标签或账本时保留尚未开始的事项草稿，不影响进行中状态接管。
+                    val draft = if (screen == "main" && task.isEnabled && store.active() == null) task.text.toString() else null
+                    if (store.active() != null) dialogs.toList().forEach { it.dismiss() }
+                    showMain(); if (draft != null) task.setText(draft)
+                }
                 else if (screen == "main") render()
                 if (reconnected) Toast.makeText(this, "已重新连接服务器，双方内容均已保留；冲突可在结束记录后查看。", Toast.LENGTH_LONG).show()
             }
@@ -109,12 +116,28 @@ class MainActivity : Activity() {
         root.addView(ledgerSpinner); locked.add(ledgerSpinner)
         root.addView(button("新建账本") { idle(); promptName("新建账本", "") { selected = store.addLedger(it); showMain() } }.also { locked.add(it) })
         task = EditText(this).apply { hint = "现在正在做什么？"; maxLines = 4; setText(current?.getString("task") ?: "") }; root.addView(task)
+        // 新增及删除入口位于下拉框右侧；管理标签时保留尚未提交的事项输入。
+        root.addView(label("标签（可选）", 14f))
+        val tagRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        tagSpinner = tagChoice(current?.optString("tag") ?: selectedTag, current != null)
+        tagRow.addView(tagSpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)); locked.add(tagSpinner)
+        tagRow.addView(button("删除") {
+            idle(); val name = chosenTag(tagSpinner); check(name.isNotEmpty()) { "请先选择标签" }
+            AlertDialog.Builder(this).setTitle("删除标签").setMessage("删除标签“$name”？历史任务保留原标签，删除会同步到其他设备。")
+                .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> safely {
+                    idle(); val draft = task.text.toString(); store.deleteTag(name); selectedTag = ""; showMain(); task.setText(draft); sync.request(true)
+                } }.create().present()
+        }.also { locked.add(it) })
+        tagRow.addView(button("新增") {
+            idle(); val draft = task.text.toString()
+            promptName("新增标签（最多 200 字）", "") { selectedTag = store.addTag(it); showMain(); task.setText(draft); sync.request(true) }
+        }.also { locked.add(it) }); root.addView(tagRow)
         elapsed = label("00:00:00", 42f).apply { gravity = android.view.Gravity.CENTER }; root.addView(elapsed)
         action = button("开始记录") {
             check(!busy) { "正在处理文件" }; val current = store.active()?.getString("id") ?: ""
             val intended = actionRecordAtPress ?: current; actionRecordAtPress = null
             check(intended == current) { "计时状态已由其他设备改变，请核对页面后再操作" }
-            if (store.active() == null) store.start(selected, task.text.toString()) else { store.finish(); task.setText("") }; showMain(); sync.request(true)
+            if (store.active() == null) store.start(selected, task.text.toString(), chosenTag(tagSpinner)) else { store.finish(); task.setText("") }; showMain(); sync.request(true)
         }
         // 返回 false，让系统保留正常点击与无障碍行为；这里只捕获用户按下时的操作对象。
         action.setOnTouchListener { _, event ->
@@ -129,6 +152,25 @@ class MainActivity : Activity() {
         root.addView(button("查看保留的冲突版本") { showConflicts() }.also { locked.add(it) })
         status = label("", 13f); root.addView(status); render()
     }
+    /** 下拉项与显示文字分离，已删除快照不会被误认为可供新任务使用的标签。 */
+    private fun tagChoice(initial: String, keepHistorical: Boolean = false): Spinner {
+        val names = store.entities("tag").map { it.getString("name") }.distinct().sorted()
+        val values = listOf("") + names + if (keepHistorical && initial.isNotEmpty() && initial !in names) listOf(initial) else emptyList()
+        return Spinner(this).apply {
+            tag = values
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, values.map {
+                if (it.isEmpty()) "无标签" else if (it !in names) "$it（已删除）" else it
+            })
+            setSelection(values.indexOf(initial).coerceAtLeast(0))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) { if (screen == "main" && store.active() == null) selectedTag = values[position] }
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+    }
+    /** 读取的是标签原始值，不将“无标签”占位文字写入数据库。 */
+    @Suppress("UNCHECKED_CAST")
+    private fun chosenTag(choice: Spinner): String = (choice.tag as List<String>)[choice.selectedItemPosition.coerceAtLeast(0)]
     /** 显示按时间差重算；后台暂停回调只影响刷新，不会丢失开始时刻。 */
     private fun render() {
         val now = System.currentTimeMillis(); clock.text = dateText(now) + " · 北京时间"
@@ -153,7 +195,7 @@ class MainActivity : Activity() {
         root.addView(button("补记") { idle(); edit(null) })
         val records = store.entities("record").filter { it.getString("ledgerId") == selected }.sortedByDescending { it.getLong("started") }
         if (records.isEmpty()) root.addView(label("这个账本还没有记录。"))
-        records.forEach { record -> root.addView(button(record.getString("task") + "\n" + dateText(record.getLong("started")) + " → " + dateText(record.getLong("ended")) + "\n" + durationText(record.getLong("ended") - record.getLong("started"))) {
+        records.forEach { record -> root.addView(button(record.getString("task") + "\n" + dateText(record.getLong("started")) + " → " + dateText(record.getLong("ended")) + "\n" + durationText(record.getLong("ended") - record.getLong("started")) + "\n标签：" + record.optString("tag", "无标签")) {
             idle(); AlertDialog.Builder(this).setTitle(record.getString("task")).setItems(arrayOf("修改", "删除")) { _, which -> safely {
                 if (which == 0) edit(record) else AlertDialog.Builder(this).setTitle("删除记录").setMessage("确认删除这条记录？")
                     .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> safely { idle(); store.deleteRecord(record.getString("id")); showDetails() } }.create().present()
@@ -171,6 +213,7 @@ class MainActivity : Activity() {
     private fun edit(record: JSONObject?) {
         idle(); val fields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 0, 24, 0) }
         val taskInput = EditText(this).apply { hint = "事项"; setText(record?.getString("task") ?: "") }; fields.addView(taskInput)
+        fields.addView(label("标签", 14f)); val recordTag = tagChoice(record?.optString("tag") ?: "", true); fields.addView(recordTag)
         fun timeInput(title: String, value: Long): EditText { fields.addView(label(title, 14f)); return EditText(this).apply { setSingleLine(true); setText(dateText(value)); fields.addView(this) } }
         val begin = timeInput("开始（北京时间）", record?.getLong("started") ?: (System.currentTimeMillis() - 60000))
         val end = timeInput("结束（北京时间）", record?.getLong("ended") ?: System.currentTimeMillis())
@@ -178,7 +221,7 @@ class MainActivity : Activity() {
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { safely {
             idle(); val format = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss").withResolverStyle(ResolverStyle.STRICT)
             fun parse(input: EditText) = LocalDateTime.parse(input.text.toString(), format).toInstant(ZoneOffset.ofHours(8)).toEpochMilli()
-            store.edit(record?.getString("id"), selected, taskInput.text.toString(), parse(begin), parse(end), record?.optString("version")); dialog.dismiss(); showDetails()
+            store.edit(record?.getString("id"), selected, taskInput.text.toString(), parse(begin), parse(end), record?.optString("version"), chosenTag(recordTag)); dialog.dismiss(); showDetails()
         } } }; dialog.present()
     }
     /** 冲突只读展示双方保留策略；完整导入版本也会随 JSON 备份导出。 */
@@ -191,8 +234,8 @@ class MainActivity : Activity() {
             val entity = content.getJSONObject("entity")
             val description = buildString {
                 append("版本 ${index+1}"); if (entity.getBoolean("deleted")) append(" · 删除状态，原内容仍保留"); append("\n")
-                if (content.getString("kind") == "ledger") append("账本名称：${entity.getString("name")}")
-                else { append(entity.getString("task")); append("\n账本：${names[entity.getString("ledgerId")] ?: "已删除或未知账本"}")
+                if (content.getString("kind") in listOf("ledger", "tag")) append("名称：${entity.getString("name")}")
+                else { append(entity.getString("task")); append("\n标签：${entity.optString("tag", "无标签")}"); append("\n账本：${names[entity.getString("ledgerId")] ?: "已删除或未知账本"}")
                     append("\n开始：${dateText(entity.getLong("started"))}"); append(if (entity.isNull("ended")) "\n结束：此版本尚未结束（存档）" else "\n结束：${dateText(entity.getLong("ended"))}") }
             }
             root.addView(label(description, 16f).apply { setTextIsSelectable(true) })

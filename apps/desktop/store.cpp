@@ -47,7 +47,9 @@ void validateLedger(const QJsonObject &ledger)
 void validateRecord(const QJsonObject &record, bool allowRunning)
 {
     validateEntity(record);
-    onlyFields(record, {"id", "ledgerId", "task", "started", "ended", "deleted", "revision", "version"});
+    onlyFields(record, {"id", "ledgerId", "task", "started", "ended", "deleted", "revision", "version", "tag"});
+    // 无标签的旧记录不添加空字段；已有快照必须是有界字符串。
+    ensure(!record.contains("tag") || (record["tag"].isString() && !record["tag"].toString().trimmed().isEmpty() && record["tag"].toString().size() <= 200), QStringLiteral("任务标签无效"));
     ensure(record["task"].isString() && !record["task"].toString().trimmed().isEmpty() && record["task"].toString().size() <= 10000,
            QStringLiteral("事项不能为空，且不能超过一万字"));
     ensure(record["ledgerId"].isString() && !record["ledgerId"].toString().isEmpty() && record["ledgerId"].toString().size() <= 128, QStringLiteral("记录缺少有效账本编号"));
@@ -163,20 +165,43 @@ void Store::deleteLedger(const QString &id)
         for (const auto &value : entities("record")) { auto record = value.toObject(); if (record["ledgerId"].toString() == id) { record["deleted"] = true; save("record", record); } }
         ledger["deleted"] = true; save("ledger", ledger); });
 }
-void Store::start(const QString &ledgerId, const QString &task)
+/** 同名标签使用跨平台一致的 UTF-8 SHA-256 编号；已删除标签可明确重新添加。 */
+QString Store::addTag(const QString &name)
+{
+    const auto text = name.trimmed();
+    transaction([&] { idle(); ensure(!text.isEmpty() && text.size() <= 200, QStringLiteral("请输入不超过 200 字的标签"));
+        const auto id = QString::fromLatin1(QCryptographicHash::hash(text.toUtf8(), QCryptographicHash::Sha256).toHex());
+        auto tag = find("tag", id);
+        if (!tag.isEmpty() && !tag["deleted"].toBool()) return;
+        save("tag", {{"id", id}, {"name", text}, {"deleted", false}, {"revision", 1}});
+    }); return text;
+}
+/** 只删除标签候选项及所有同名导入版本，不修改记录中已经保存的标签文字。 */
+void Store::deleteTag(const QString &name)
+{
+    transaction([&] { idle(); bool found = false;
+        for (const auto &value : entities("tag")) { auto tag = value.toObject(); if (tag["name"].toString() == name) { tag["deleted"] = true; save("tag", tag); found = true; } }
+        ensure(found, QStringLiteral("标签已被删除，请重新选择"));
+    });
+}
+void Store::start(const QString &ledgerId, const QString &task, const QString &tag)
 {
     transaction([&] { idle(); const auto ledger = find("ledger", ledgerId);
         ensure(!ledger.isEmpty() && !ledger["deleted"].toBool(), QStringLiteral("请先选择账本"));
         ensure(!task.trimmed().isEmpty() && task.size() <= 10000, QStringLiteral("请输入不超过一万字的事项"));
-        save("record", {{"id", identity()}, {"ledgerId", ledgerId}, {"task", task.trimmed()},
-             {"started", QDateTime::currentMSecsSinceEpoch()}, {"ended", QJsonValue::Null}, {"deleted", false}, {"revision", 1}}); });
+        bool validTag = tag.isEmpty(); for (const auto &value : entities("tag")) if (value.toObject()["name"].toString() == tag) validTag = true;
+        ensure(validTag, QStringLiteral("标签已被删除，请重新选择"));
+        QJsonObject record{{"id", identity()}, {"ledgerId", ledgerId}, {"task", task.trimmed()},
+             {"started", QDateTime::currentMSecsSinceEpoch()}, {"ended", QJsonValue::Null}, {"deleted", false}, {"revision", 1}};
+        if (!tag.isEmpty()) record["tag"] = tag;
+        save("record", record); });
 }
 void Store::finish(qint64 ended)
 {
     transaction([&] { auto record = active(); ensure(!record.isEmpty(), QStringLiteral("没有进行中的记录"));
         record["ended"] = ended; validateRecord(record); save("record", record); });
 }
-void Store::editRecord(const QString &id, const QString &ledgerId, const QString &task, qint64 started, qint64 ended, const QString &expectedVersion)
+void Store::editRecord(const QString &id, const QString &ledgerId, const QString &task, qint64 started, qint64 ended, const QString &expectedVersion, const QString &tag)
 {
     transaction([&] { idle(); const auto ledger = find("ledger", ledgerId);
         ensure(!ledger.isEmpty() && !ledger["deleted"].toBool(), QStringLiteral("账本不存在"));
@@ -184,6 +209,13 @@ void Store::editRecord(const QString &id, const QString &ledgerId, const QString
         ensure(!record.isEmpty() && !record["deleted"].toBool() && (id.isEmpty() || record["ledgerId"].toString() == ledgerId), QStringLiteral("记录不存在或不属于此账本"));
         ensure(expectedVersion.isEmpty() || record["version"].toString() == expectedVersion, QStringLiteral("记录已被另一设备更新，请保留输入并重新打开修改"));
         record["ledgerId"] = ledgerId; record["task"] = task.trimmed(); record["started"] = started; record["ended"] = ended;
+        // 未传入标签参数的旧调用保留原快照；显式清空才移除标签字段。
+        if (!tag.isNull()) {
+            bool valid = tag.isEmpty() || record["tag"].toString() == tag;
+            for (const auto &value : entities("tag")) if (value.toObject()["name"].toString() == tag) valid = true;
+            ensure(valid, QStringLiteral("标签已被删除，请重新选择"));
+            if (tag.isEmpty()) record.remove("tag"); else record["tag"] = tag;
+        }
         validateRecord(record); save("record", record); });
 }
 void Store::deleteRecord(const QString &id)
@@ -195,7 +227,7 @@ QJsonObject Store::backup() const
 {
     idle(); QJsonArray pending;
     for (const auto &value : conflicts()) pending.append(value);
-    return {{"format", "lyushi.backup"}, {"formatVersion", 1}, {"ledgers", entities("ledger", true)},
+    return {{"format", "lyushi.backup"}, {"formatVersion", 2}, {"tags", entities("tag", true)}, {"ledgers", entities("ledger", true)},
         {"records", entities("record", true)}, {"conflicts", pending}};
 }
 QJsonArray Store::conflicts() const
@@ -209,7 +241,7 @@ QJsonArray Store::conflicts() const
  */
 QJsonObject Store::importBackup(const QJsonObject &data)
 {
-    ensure(data["format"].toString() == "lyushi.backup" && data["formatVersion"].toInt() == 1
+    ensure(data["format"].toString() == "lyushi.backup" && (data["formatVersion"].toInt() == 1 || (data["formatVersion"].toInt() == 2 && data["tags"].isArray()))
            && data["ledgers"].isArray() && data["records"].isArray() && data["conflicts"].isArray(), QStringLiteral("不支持的备份格式"));
     int added = 0, duplicate = 0, conflictCount = 0;
     transaction([&] {
@@ -223,8 +255,11 @@ QJsonObject Store::importBackup(const QJsonObject &data)
             ensure(ledgerIds.contains(entity["ledgerId"].toString()), QStringLiteral("备份记录缺少所属账本"));
             ensure(!seen.contains(entity["id"].toString()), QStringLiteral("备份有重复记录编号")); seen.insert(entity["id"].toString());
         }
+        QSet<QString> tagIds;
+        for (const auto &value : data["tags"].toArray()) { const auto entity = value.toObject(); validateLedger(entity);
+            ensure(!tagIds.contains(entity["id"].toString()), QStringLiteral("备份有重复标签编号")); tagIds.insert(entity["id"].toString()); }
         auto preserve = [&](const QString &kind, const QJsonObject &entity, bool archived = false) {
-            ensure(kind == "record" || kind == "ledger", QStringLiteral("冲突类型无效"));
+            ensure(kind == "record" || kind == "ledger" || kind == "tag", QStringLiteral("冲突类型无效"));
             if (kind == "record") validateRecord(entity, archived); else validateLedger(entity);
             QJsonObject wrapped{{"kind", kind}, {"entity", entity}, {"archived", true}};
             const auto payload = QJsonDocument(wrapped).toJson(QJsonDocument::Compact);
@@ -234,8 +269,8 @@ QJsonObject Store::importBackup(const QJsonObject &data)
             conflictCount += query.numRowsAffected();
             if (query.numRowsAffected() == 1) queueArchive(wrapped);
         };
-        for (const auto &kind : {QString("ledger"), QString("record")}) {
-            for (const auto &value : data[kind == "ledger" ? "ledgers" : "records"].toArray()) {
+        for (const auto &kind : {QString("tag"), QString("ledger"), QString("record")}) {
+            for (const auto &value : data[kind == "ledger" ? "ledgers" : kind == "tag" ? "tags" : "records"].toArray()) {
                 const auto entity = value.toObject(); const auto local = find(kind, entity["id"].toString());
                 const auto parent = kind == "record" ? find("ledger", entity["ledgerId"].toString()) : QJsonObject{};
                 auto localContent = local, incomingContent = entity;
@@ -254,12 +289,12 @@ QString Store::csv(const QString &ledgerId) const
 {
     idle(); auto quote = [](QString text) { if (!text.isEmpty() && QString("=+-@\t\r").contains(text.front())) text.prepend('\''); text.replace("\"", "\"\""); return "\"" + text + "\""; };
     auto date = [](qint64 ms) { return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC).toOffsetFromUtc(28800).toString("yyyy-MM-dd HH:mm:ss.zzz"); };
-    QString result = QString::fromUtf8("\xEF\xBB\xBF") + QStringLiteral("账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号\r\n");
+    QString result = QString::fromUtf8("\xEF\xBB\xBF") + QStringLiteral("账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号,标签\r\n");
     for (const auto &value : entities("record")) {
         const auto record = value.toObject(); if (!ledgerId.isEmpty() && record["ledgerId"].toString() != ledgerId) continue;
         const auto ledger = find("ledger", record["ledgerId"].toString()); if (ledger["deleted"].toBool()) continue;
         result += QStringList{quote(ledger["name"].toString()), quote(record["task"].toString()), quote(date(record["started"].toInteger())),
-            quote(date(record["ended"].toInteger())), quote(QString::number((record["ended"].toInteger() - record["started"].toInteger()) / 1000.0, 'f', 3)), quote(record["id"].toString())}.join(',') + "\r\n";
+            quote(date(record["ended"].toInteger())), quote(QString::number((record["ended"].toInteger() - record["started"].toInteger()) / 1000.0, 'f', 3)), quote(record["id"].toString()), quote(record["tag"].toString())}.join(',') + "\r\n";
     }
     return result;
 }

@@ -83,7 +83,7 @@ bool Store::acceptSync(const QJsonObject &response, const QJsonArray &sent)
         qint64 cursor = before["cursor"].toInteger(); QSet<QString> touched;
         for (const auto &value : response["changes"].toArray()) {
             const auto change = value.toObject(); const auto kind = change["kind"].toString(), id = change["id"].toString();
-            ensure((kind == "ledger" || kind == "record" || kind == "archive") && !id.isEmpty() && change["seq"].toInteger() > cursor && change["heads"].isArray() && !change["heads"].toArray().isEmpty(), QStringLiteral("同步变更无效"));
+            ensure((kind == "ledger" || kind == "record" || kind == "tag" || kind == "archive") && !id.isEmpty() && change["seq"].toInteger() > cursor && change["heads"].isArray() && !change["heads"].toArray().isEmpty(), QStringLiteral("同步变更无效"));
             cursor = change["seq"].toInteger(); touched.insert(kind + ":" + id);
             query.prepare("DELETE FROM sync_heads WHERE kind=? AND id=?"); query.addBindValue(kind); query.addBindValue(id); run(query);
             const auto heads = change["heads"].toArray();
@@ -92,13 +92,13 @@ bool Store::acceptSync(const QJsonObject &response, const QJsonArray &sent)
                 query.prepare("DELETE FROM sync_awaiting WHERE version=?"); query.addBindValue(entity["version"].toString()); run(query);
                 if (kind == "archive") {
                     auto content = entity["content"].toObject(); const auto original = content["entity"].toObject(); const auto originalKind = content["kind"].toString();
-                    ensure(originalKind == "ledger" || originalKind == "record", QStringLiteral("同步档案类型无效"));
-                    if (originalKind == "record") validateRecord(original, true); else ensure(!original["name"].toString().trimmed().isEmpty(), QStringLiteral("同步档案名称无效"));
+                    ensure(originalKind == "ledger" || originalKind == "record" || originalKind == "tag", QStringLiteral("同步档案类型无效"));
+                    if (originalKind == "record") validateRecord(original, true); else validateLedger(original);
                     content["archived"] = true;
                     query.prepare("INSERT OR IGNORE INTO conflicts(id,kind,entity_id,payload) VALUES(?,?,?,?)"); query.addBindValue(id); query.addBindValue(originalKind); query.addBindValue(original["id"].toString()); query.addBindValue(QJsonDocument(content).toJson(QJsonDocument::Compact)); run(query);
                 }
                 else if (kind == "record") { auto completed = entity; if (completed["ended"].isNull()) completed["ended"] = completed["started"]; validateRecord(completed); }
-                else ensure(!entity["name"].toString().trimmed().isEmpty(), QStringLiteral("同步账本名无效"));
+                else validateLedger(entity);
                 query.prepare("INSERT INTO sync_heads(kind,id,version,payload) VALUES(?,?,?,?)"); query.addBindValue(kind); query.addBindValue(id); query.addBindValue(entity["version"].toString()); query.addBindValue(QJsonDocument(entity).toJson(QJsonDocument::Compact)); run(query);
                 if (heads.size() > 1 && kind != "archive") preserveRemote(kind, entity);
             }
@@ -111,7 +111,7 @@ bool Store::acceptSync(const QJsonObject &response, const QJsonArray &sent)
             query.prepare("SELECT payload FROM sync_heads WHERE kind=? AND id=? ORDER BY version"); query.addBindValue(kind); query.addBindValue(id); run(query);
             QJsonArray heads; while (query.next()) heads.append(QJsonDocument::fromJson(query.value(0).toByteArray()).object());
             const auto current = find(kind, id); QJsonObject chosen;
-            auto priority = [&](const QJsonObject &entity) { return (!entity["deleted"].toBool() ? 4 : 0) + (kind == "record" && entity["ended"].isNull() ? 8 : 0) + (entity["version"] == current["version"] ? 1 : 0); };
+            auto priority = [&](const QJsonObject &entity) { return (kind == "tag" && entity["deleted"].toBool() ? 16 : 0) + (!entity["deleted"].toBool() ? 4 : 0) + (kind == "record" && entity["ended"].isNull() ? 8 : 0) + (entity["version"] == current["version"] ? 1 : 0); };
             for (const auto &head : heads) if (chosen.isEmpty() || priority(head.toObject()) > priority(chosen)) chosen = head.toObject();
             if (chosen != current) { changed = true; query.prepare("INSERT OR REPLACE INTO entities(kind,id,payload) VALUES(?,?,?)"); query.addBindValue(kind); query.addBindValue(id); query.addBindValue(QJsonDocument(chosen).toJson(QJsonDocument::Compact)); run(query); }
         }

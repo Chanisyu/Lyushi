@@ -29,6 +29,6 @@ for ($attempt = 0; $attempt -lt 90; $attempt++) {
 }
 if (-not $report) { throw '等待安卓检查报告超时，未写入成功结果' }
 [System.IO.File]::WriteAllText($reportPath,$text,[System.Text.UTF8Encoding]::new($false))
-if (-not $report.passed -or $report.appVersion -ne '0.3.1') { throw '安卓当前版本的协议检查未通过' }
-Copy-Item -LiteralPath $apk -Destination (Join-Path $projectDirectory 'dist/lyushi-android-0.3.1-beta.apk') -Force
+if (-not $report.passed -or $report.appVersion -ne '0.4.0') { throw '安卓当前版本的协议检查未通过' }
+Copy-Item -LiteralPath $apk -Destination (Join-Path $projectDirectory 'dist/lyushi-android-0.4.0-beta.apk') -Force
 $report | ConvertTo-Json -Depth 4

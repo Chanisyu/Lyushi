@@ -66,6 +66,30 @@ internal fun runSyncChecks(context: Context): JSONObject {
         // 当前协议未知字段必须在导入时拒绝，不能变成服务器永远拒绝的待传操作。
         val unsupported = JSONObject(backup.toString()); unsupported.getJSONArray("records").getJSONObject(0).put("futureField","unsupported")
         check(runCatching { store.importBackup(unsupported) }.isFailure)
+        // 标签场景使用独立数据库，验证名称身份、历史快照、备份与跨页远端删除。
+        context.deleteDatabase("tag-check.sqlite")
+        Store(context, "tag-check.sqlite").use { tagged ->
+            val ledger = tagged.addLedger("标签检查")
+            tagged.addTag(" 学习 "); tagged.addTag("学习"); check(tagged.entities("tag").size == 1)
+            tagged.start(ledger, "标签任务", "学习"); tagged.finish(tagged.active()!!.getLong("started") + 1000)
+            tagged.deleteTag("学习"); check(tagged.entities("tag").isEmpty())
+            check(tagged.entities("record").single().getString("tag") == "学习" && tagged.csv(null).contains("学习"))
+            val tagBackup = tagged.backup()
+            context.deleteDatabase("tag-restore-check.sqlite")
+            Store(context, "tag-restore-check.sqlite").use { restored ->
+                restored.importBackup(tagBackup); check(restored.entities("tag").isEmpty())
+                check(restored.entities("record").single().getString("tag") == "学习")
+                restored.addTag("学习"); check(restored.entities("tag").size == 1)
+            }
+            // 已存在的本机待传操作全部确认后，才能检查远端独立标签的变化。
+            val sentTags = tagged.syncRequest().getJSONArray("operations"); val changes = JSONArray(); val ackTags = JSONArray()
+            var tagSeq = 0L
+            sentTags.objects().forEach { op -> ackTags.put(op.getString("id")); changes.put(JSONObject().put("seq", ++tagSeq).put("kind", op.getString("kind")).put("id", op.getString("entityId")).put("heads", JSONArray().put(op.getJSONObject("entity")))) }
+            tagged.acceptSync(JSONObject().put("serverId", "tag-server").put("cursor", tagSeq).put("ack", ackTags).put("changes", changes).put("more", false), sentTags)
+            val old = JSONObject(tagBackup.toString()).put("formatVersion", 1).apply { remove("tags"); getJSONArray("records").getJSONObject(0).remove("tag") }
+            context.deleteDatabase("tag-old-check.sqlite")
+            Store(context, "tag-old-check.sqlite").use { legacy -> legacy.importBackup(old); check(!legacy.entities("record").single().has("tag")) }
+        }
         context.deleteDatabase("batch-check.sqlite")
         Store(context,"batch-check.sqlite").use { batch ->
             val batchBook = batch.addLedger("批次检查")
@@ -74,6 +98,6 @@ internal fun runSyncChecks(context: Context): JSONObject {
             val request = batch.syncRequest(); val count = request.getJSONArray("operations").length()
             check(count in 1..49 && canonical(request).toByteArray(Charsets.UTF_8).size < 2*1024*1024)
         }
-        JSONObject().put("passed",true).put("appVersion",BuildConfig.VERSION_NAME).put("versionCode",BuildConfig.VERSION_CODE).put("checks",JSONArray(listOf("unchanged poll","remote stop","concurrent branches","stale edit protection","pagination protection","known-branch delete","backup quarantine","transaction rollback","server identity","unknown field rejection","bounded batches")))
+        JSONObject().put("passed",true).put("appVersion",BuildConfig.VERSION_NAME).put("versionCode",BuildConfig.VERSION_CODE).put("checks",JSONArray(listOf("unchanged poll","remote stop","concurrent branches","stale edit protection","pagination protection","known-branch delete","backup quarantine","transaction rollback","server identity","unknown field rejection","bounded batches","tag lifecycle and backup compatibility")))
     }
 }

@@ -25,9 +25,12 @@ public:
     QString addLedger(const QString &name);
     void renameLedger(const QString &id, const QString &name);
     void deleteLedger(const QString &id);
-    void start(const QString &ledgerId, const QString &task);
+    /** 标签采用名称的确定性身份跨端去重；删除保留任务历史快照。 */
+    QString addTag(const QString &name);
+    void deleteTag(const QString &name);
+    void start(const QString &ledgerId, const QString &task, const QString &tag = {});
     void finish(qint64 ended);
-    void editRecord(const QString &id, const QString &ledgerId, const QString &task, qint64 started, qint64 ended, const QString &expectedVersion = {});
+    void editRecord(const QString &id, const QString &ledgerId, const QString &task, qint64 started, qint64 ended, const QString &expectedVersion = {}, const QString &tag = {});
     void deleteRecord(const QString &id);
     QJsonObject backup() const;
     QJsonObject importBackup(const QJsonObject &data);

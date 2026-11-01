@@ -9,7 +9,7 @@ if (-not $ToolchainDirectory) { $ToolchainDirectory = $QtDirectory }
 $qtDirectory = [System.IO.Path]::GetFullPath($QtDirectory)
 $toolchainDirectory = [System.IO.Path]::GetFullPath($ToolchainDirectory)
 $buildDirectory = Join-Path $projectDirectory 'build/desktop-windows'
-$outputDirectory = Join-Path $projectDirectory 'dist/Lyushi'
+$outputDirectory = Join-Path $projectDirectory 'dist/Lyushi-0.4.0'
 $previousPath = $env:PATH
 try {
     $env:PATH = "$qtDirectory/bin;$toolchainDirectory/bin;$previousPath"
@@ -17,8 +17,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'CMake 配置失败' }
     cmake --build $buildDirectory --parallel 3
     if ($LASTEXITCODE -ne 0) { throw '桌面编译失败' }
-    # 仅重建本脚本产生的目录；删除前验证绝对路径和目录本身不是重解析链接。
-    $expectedOutput = [System.IO.Path]::GetFullPath((Join-Path $projectDirectory 'dist/Lyushi'))
+    # 为新版本使用独立目录，避免覆盖用户正在运行的旧版；仅重建本脚本产生的目录；删除前验证绝对路径和目录本身不是重解析链接。
+    $expectedOutput = [System.IO.Path]::GetFullPath((Join-Path $projectDirectory 'dist/Lyushi-0.4.0'))
     if ([System.IO.Path]::GetFullPath($outputDirectory) -ne $expectedOutput) { throw '打包目标不在指定输出目录' }
     if (Test-Path -LiteralPath $outputDirectory) {
         $existingOutput = Get-Item -LiteralPath $outputDirectory -Force
@@ -69,7 +69,7 @@ try {
     }
     # 随包说明使用独立文本，不包含只在项目目录中才能打开的相对链接。
     $bundleNotes = '
-柳时 0.3.1
+柳时 0.4.0
 
 完整解压后运行 lyushi.exe，保留同目录运行库与插件。
 新建账本、输入事项后开始计时，结束后查看明细。关闭程序不会结束记录。
@@ -83,7 +83,7 @@ try {
     foreach ($notice in @('LICENSE','NOTICE','THIRD_PARTY_NOTICES.md')) {
         Copy-Item -LiteralPath (Join-Path $projectDirectory $notice) -Destination $outputDirectory -Force
     }
-    Compress-Archive -LiteralPath $outputDirectory -DestinationPath "$projectDirectory/dist/lyushi-windows-0.3.1-beta.zip" -Force
+    Compress-Archive -LiteralPath $outputDirectory -DestinationPath "$projectDirectory/dist/lyushi-windows-0.4.0-beta.zip" -Force
 } finally {
     $env:PATH = $previousPath
 }

@@ -82,20 +82,23 @@ private fun Store.acceptSyncTransaction(response: JSONObject, sent: JSONArray): 
     var cursor = before.getLong("cursor"); val touched = mutableSetOf<Pair<String,String>>()
     response.getJSONArray("changes").objects().forEach { change ->
         val kind = change.getString("kind"); val id = change.getString("id"); val heads = change.getJSONArray("heads").objects()
-        check(kind in listOf("ledger", "record", "archive") && id.isNotEmpty() && heads.isNotEmpty() && change.getLong("seq") > cursor) { "同步变更无效" }
+        check(kind in listOf("ledger", "record", "tag", "archive") && id.isNotEmpty() && heads.isNotEmpty() && change.getLong("seq") > cursor) { "同步变更无效" }
         cursor = change.getLong("seq"); touched.add(kind to id); db.delete("sync_heads", "kind=? AND id=?", arrayOf(kind,id))
         heads.forEach { entity ->
             check(entity.getString("id") == id && entity.getString("version").isNotEmpty() && entity.get("deleted") is Boolean) { "同步版本无效" }
             if (kind == "archive") {
                 val content = entity.getJSONObject("content"); val originalKind = content.getString("kind"); val original = content.getJSONObject("entity")
-                check(originalKind in listOf("ledger","record") && original.getString("id").isNotEmpty()) { "同步档案类型无效" }
+                check(originalKind in listOf("ledger","record","tag") && original.getString("id").isNotEmpty()) { "同步档案类型无效" }
+                // 归档标签与任务同样校验，防止导入内容经网络绕过字段和长度限制。
+                if (originalKind == "record") validateRecord(original, true) else validateLedger(original)
                 content.put("archived",true)
                 db.insertWithOnConflict("conflicts",null,ContentValues().apply { put("id",id);put("kind",originalKind);put("entity_id",original.getString("id"));put("payload",canonical(content)) },SQLiteDatabase.CONFLICT_IGNORE)
             } else if (kind == "record") {
+                validateRecord(entity, true)
                 check(entity.get("task") is String && entity.getString("task").isNotBlank() && entity.getString("task").length <= 10000 && entity.getString("ledgerId").isNotEmpty()) { "同步事项无效" }
                 check(entity.get("started") is Number && entity.getLong("started") >= 0 && entity.getLong("started") < 253402271999000L && entity.has("ended"))
                 if (!entity.isNull("ended")) check(entity.get("ended") is Number && entity.getLong("ended") >= entity.getLong("started") && entity.getLong("ended") < 253402271999000L)
-            } else check(entity.getString("name").isNotBlank() && entity.getString("name").length <= 200)
+            } else validateLedger(entity)
             db.delete("sync_awaiting", "version=?", arrayOf(entity.getString("version")))
             db.insertOrThrow("sync_heads", null, ContentValues().apply { put("kind", kind); put("id", id); put("version", entity.getString("version")); put("payload", canonical(entity)) })
             if (heads.size > 1 && kind != "archive") {
@@ -112,7 +115,7 @@ private fun Store.acceptSyncTransaction(response: JSONObject, sent: JSONArray): 
         if (!pending) {
             val heads = db.rawQuery("SELECT payload FROM sync_heads WHERE kind=? AND id=? ORDER BY version", arrayOf(kind,id)).use { rows -> buildList { while (rows.moveToNext()) add(JSONObject(rows.getString(0))) } }
             val current = find(kind,id)
-            fun priority(entity: JSONObject) = (if (!entity.getBoolean("deleted")) 4 else 0) + (if (kind == "record" && entity.isNull("ended")) 8 else 0) + (if (entity.optString("version") == current?.optString("version")) 1 else 0)
+            fun priority(entity: JSONObject) = (if (kind == "tag" && entity.getBoolean("deleted")) 16 else 0) + (if (!entity.getBoolean("deleted")) 4 else 0) + (if (kind == "record" && entity.isNull("ended")) 8 else 0) + (if (entity.optString("version") == current?.optString("version")) 1 else 0)
             val chosen = heads.maxBy { priority(it) }
             if (canonical(chosen) != canonical(current)) { changed = true; db.insertWithOnConflict("entities", null, ContentValues().apply { put("kind",kind); put("id",id); put("payload",canonical(chosen)) }, SQLiteDatabase.CONFLICT_REPLACE).also { check(it != -1L) } }
         }

@@ -72,7 +72,7 @@ try {
             $operations+=@{id=$version;kind='record';entityId=$base.id;parents=@($parent);entity=$entity}; $parent=$version
         }
         $body=@{serverId=$serverId;cursor=$cursor;operations=$operations}|ConvertTo-Json -Depth 9 -Compress
-        $reply=Invoke-RestMethod "$address/v1/sync" -Method Post -Headers @{Authorization="Bearer $token"} -ContentType application/json -Body $body
+        $reply=Invoke-RestMethod "$address/v1/sync" -Method Post -Headers @{Authorization="Bearer $token";"X-Lyushi-Protocol"="2"} -ContentType application/json -Body $body
         $serverId=$reply.serverId; $cursor=$reply.cursor
     }
     Apply-Edit $one $base 'pending-across-pages'
@@ -80,12 +80,28 @@ try {
     $final=Inspect-Client $one
     if ($final.records[0].task -ne 'pending-across-pages' -or $final.pending -ne 0) { throw '分页覆盖了本机新内容' }
 
+    # 标签跨设备新增、任务关联、删除及历史快照均通过真实客户端进程验证。
+    $tagCommand=Join-Path $sandbox 'tag-command.json'
+    @{action='add-tag';name='同步标签'}|ConvertTo-Json|Set-Content -LiteralPath $tagCommand -Encoding UTF8
+    Invoke-Client '--command' $one @($tagCommand)
+    $tagged=(Inspect-Client $one).records[0]
+    @{action='tag-record';id='';ledgerId=$tagged.ledgerId;task='独立标签任务';started=$tagged.started;ended=$tagged.ended;tag='同步标签'}|ConvertTo-Json|Set-Content -LiteralPath $tagCommand -Encoding UTF8
+    Invoke-Client '--command' $one @($tagCommand)
+    $taggedEntry=(Inspect-Client $one).records | Where-Object {$_.task -eq '独立标签任务'}
+    Invoke-Client '--sync-once' $one @($address,$keyFile); Invoke-Client '--sync-once' $two @($address,$keyFile)
+    $taggedRemote=Inspect-Client $two
+    if (($taggedRemote.records | Where-Object {$_.id -eq $taggedEntry.id}).tag -ne '同步标签' -or @($taggedRemote.tags | Where-Object {-not $_.deleted}).Count -ne 1) { throw '标签新增或任务标签未同步' }
+    @{action='delete-tag';name='同步标签'}|ConvertTo-Json|Set-Content -LiteralPath $tagCommand -Encoding UTF8
+    Invoke-Client '--command' $two @($tagCommand); Invoke-Client '--sync-once' $two @($address,$keyFile); Invoke-Client '--sync-once' $one @($address,$keyFile)
+    $afterTagDelete=Inspect-Client $one
+    if (@($afterTagDelete.tags | Where-Object {-not $_.deleted}).Count -ne 0 -or ($afterTagDelete.records | Where-Object {$_.id -eq $taggedEntry.id}).tag -ne '同步标签') { throw '标签删除未同步或历史标签丢失' }
+
     # 明确删除覆盖全部已知分支，仍保留冲突档案；另一端收到删除状态。
     Invoke-Client '--sync-once' $two @($address,$keyFile)
     $delete=Join-Path $sandbox 'delete.json'; @{action='delete';id=$base.id}|ConvertTo-Json|Set-Content -LiteralPath $delete -Encoding UTF8
     Invoke-Client '--command' $one @($delete); Invoke-Client '--sync-once' $one @($address,$keyFile); Invoke-Client '--sync-once' $two @($address,$keyFile)
-    if (-not (Inspect-Client $two).records[0].deleted) { throw '删除未传播' }
-    $summary=@{passed=$true;crossDeviceStop=$true;offlineBranches=$true;paginationProtectsPending=$true;deletePropagation=$true;directory=$sandbox}
+    if (-not ((Inspect-Client $two).records | Where-Object {$_.id -eq $base.id}).deleted) { throw '删除未传播' }
+    $summary=@{passed=$true;tagLifecycle=$true;crossDeviceStop=$true;offlineBranches=$true;paginationProtectsPending=$true;deletePropagation=$true;directory=$sandbox}
     $summary|ConvertTo-Json|Set-Content -LiteralPath "$projectDirectory/build/sync-local-result.json" -Encoding UTF8
     $summary|ConvertTo-Json
 } finally {

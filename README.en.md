@@ -26,6 +26,8 @@ Daily tracking consists of four steps: select a ledger, enter an activity, start
 
 The project's own source code and documentation are licensed under the [Apache License 2.0](LICENSE). Third-party components retain their respective licenses; see [Third-party notices](THIRD_PARTY_NOTICES.md), currently maintained in Chinese.
 
+[Changelog (Chinese)](CHANGELOG.md)
+
 ## Contents
 
 - [Features and scope](#features-and-scope)
@@ -33,6 +35,7 @@ The project's own source code and documentation are licensed under the [Apache L
 - [Initial configuration](#initial-configuration)
 - [Usage](#usage)
 - [Synchronization and data handling](#synchronization-and-data-handling)
+- [Upgrading to 0.4.0](#upgrading-to-040)
 - [Server deployment](#server-deployment)
 - [Backups, recovery, and device management](#backups-recovery-and-device-management)
 - [Project structure and module responsibilities](#project-structure-and-module-responsibilities)
@@ -46,6 +49,7 @@ The project's own source code and documentation are licensed under the [Apache L
 | Feature | Description |
 | --- | --- |
 | Separate ledgers | Create, select, rename, and delete ledgers; view each ledger's entries separately |
+| Task tags | One optional tag per entry, with selection, creation, deletion, and device synchronization |
 | Start and stop | Save actual start and end times and display elapsed seconds; no pause function |
 | Session recovery | Closing the application leaves the entry unfinished; reopening restores it |
 | Entry management | View activities, timestamps, and durations; add past entries, edit, or delete individual entries |
@@ -63,13 +67,13 @@ The English README documents the existing application; the application interface
 
 ## Installation
 
-The current version is **0.3.1**. Existing distribution filenames retain the `beta` suffix to indicate release maturity. The project user has manually verified synchronization with the server on all three platforms. A public repository and download location have not yet been established; no repository name or release URL is assumed here.
+The current version is **0.4.0**. Existing distribution filenames retain the `beta` suffix to indicate release maturity. The project user manually verified synchronization on all three platforms before the tag feature; verification coverage for 0.4.0 is described below. A public repository and download location have not yet been established; no repository name or release URL is assumed here.
 
 | Platform | Verified environment | Installation file |
 | --- | --- | --- |
-| Windows | Windows 11, x64 | `lyushi-windows-0.3.1-beta.zip` |
-| Android | Android 17 | `lyushi-android-0.3.1-beta.apk` |
-| Ubuntu | Ubuntu 26.04 LTS, amd64 | `lyushi_0.3.1_amd64.deb` |
+| Windows | Windows 11, x64 | `lyushi-windows-0.4.0-beta.zip` |
+| Android | Android 17 | `lyushi-android-0.4.0-beta.apk` |
+| Ubuntu | Ubuntu 26.04 LTS, amd64 | `lyushi_0.4.0_amd64.deb` |
 | Sync server | Ubuntu 24.04, x64 | `lyushi-server-linux-amd64` |
 
 Locally built artifacts are stored in `dist/`, which is excluded from source control. Android's configured minimum version is Android 8.0 (API 26); this does not mean every older device or OS version has been tested.
@@ -77,7 +81,7 @@ Locally built artifacts are stored in `dist/`, which is excluded from source con
 ### Windows
 
 1. Extract the complete ZIP archive to a writable directory.
-2. Run `Lyushi/lyushi.exe`.
+2. Run `Lyushi-0.4.0/lyushi.exe`.
 3. Keep the bundled DLLs, plugins, and license files alongside the executable. Do not copy only the EXE.
 
 Application data is stored in the current OS user's application data directory, separately from the installation files. Export a JSON backup before upgrading, and do not overwrite the user data directory when replacing the program.
@@ -93,7 +97,7 @@ The current APK is signed with a debug certificate and is intended for evaluatio
 Run the following command in the directory containing the package:
 
 ```bash
-sudo apt install ./lyushi_0.3.1_amd64.deb
+sudo apt install ./lyushi_0.4.0_amd64.deb
 ```
 
 Launch “柳时” from the application menu or run `lyushi`. Qt 6, the SQLite driver, and a working desktop keyring are required. Runtime dependencies are declared in the package.
@@ -127,6 +131,16 @@ Keys are protected using Windows DPAPI, Android Keystore, and Ubuntu Secret Serv
 
 While tracking, ledger switching, ledger details, import/export, and connection configuration are unavailable. Closing the window, exiting the application, or restarting the device does not automatically finish the entry. Once synchronized, the same entry can be stopped from another device.
 
+### Select and manage task tags
+
+The Tag selector (`标签`) appears below the activity input. Choose No tag (`无标签`) or an existing tag before starting. Tags are shared across the personal workspace; entries remain assigned to their own ledgers.
+
+- **Create**: select Add tag (`新增标签`, or `新增` on Android) to the right of the selector. Enter a name of up to 200 UTF-16 code units. The saved tag is immediately available and selected for use in later entries.
+- **Delete**: select a tag and use Delete tag (`删除标签`, or `删除` on Android) to its right. After confirmation, removal synchronizes to other devices. Historical entries retain their original tag text.
+- **Edit an entry**: when no timer is active, open an entry's Edit dialog to change or clear its tag. Past entries can also be created with tags.
+
+Leading and trailing whitespace is trimmed. Deterministic identities deduplicate matching names. Re-adding a deleted name explicitly restores the option. Tag controls are locked while tracking. If deletion and offline creation conflict, deletion takes priority in the selector while conflicting content remains archived.
+
 ### View, add, and edit entries
 
 When no entry is active, open Ledger details and management (`账本明细与管理`):
@@ -148,7 +162,7 @@ Ledgers are identified by stable IDs. Matching names do not make two ledgers ide
 | Export all CSV (`导出全部 CSV`) | Export entries from all ledgers |
 | Import JSON (`导入 JSON`) | Merge backup data, deduplicate matching content, and retain differing content as conflict versions |
 
-CSV contains ledger names, activities, start and end times, durations in seconds, and entry IDs. It is not a complete recovery format. CSV uses UTF-8 and handles spreadsheet formula prefixes. JSON imports are limited to 32 MiB per file; invalid formats, unknown fields, or invalid timestamps roll back the entire import.
+CSV contains ledger names, activities, start and end times, durations in seconds, entry IDs, and tags. It is not a complete recovery format. CSV uses UTF-8 and handles spreadsheet formula prefixes. JSON imports are limited to 32 MiB per file; invalid formats, unknown fields, or invalid timestamps roll back the entire import.
 
 Import is a merge, not a destructive reset-and-restore operation. Older backups do not directly override known deletions, and historical unfinished versions do not automatically become active timers. Before migrating, export JSON from the original device, import and verify it on the new device, and then configure synchronization.
 
@@ -163,6 +177,14 @@ When offline devices start or edit entries concurrently, the server retains conc
 Deletions propagate to other devices, but the current implementation uses logical deletion and retained version history. It does not promise immediate physical erasure from history, backups, or underlying storage. An unknown offline version is not deleted in advance by another device.
 
 Clients retain the server identity and synchronization cursor. Reinitializing a server or changing to a different server can trigger identity protection; changing the URL alone is not a migration procedure. See the [synchronization protocol](docs/sync-protocol.md), currently maintained in Chinese.
+
+## Upgrading to 0.4.0
+
+Version 0.4.0 adds tag entities and per-entry tag snapshots, raising the synchronization capability version to 2. Clients send `X-Lyushi-Protocol: 2`. Before starting a write transaction, the server rejects older clients without this capability using HTTP 426.
+
+Export JSON and back up the server database before upgrading, then update the server and all three clients. Existing databases, device keys, server identity, and pending operations are retained; no reset or new device registration is required. Older clients keep their local entries and can resume uploading after upgrading.
+
+New JSON backups use `formatVersion: 2`, including available tags and deletion states. New clients still accept version 1 backups; older clients should not import version 2. The 0.4.0 tag changes have been tested with local Qt clients, the Android emulator, and Ubuntu self-tests. The previously reported manual public-network verification predates the tag feature.
 
 ## Server deployment
 

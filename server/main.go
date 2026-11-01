@@ -128,17 +128,21 @@ func validate(op Operation) error {
 	}
 	allowed := map[string]bool{"id": true, "deleted": true, "revision": true, "version": true}
 	switch op.Kind {
-	case "ledger":
+	case "ledger", "tag":
 		allowed["name"] = true
 		if !text(e["name"], 1, 200) {
 			return errors.New("invalid ledger name")
 		}
 	case "record":
-		for _, key := range []string{"task", "ledgerId", "started", "ended"} {
+		for _, key := range []string{"task", "ledgerId", "started", "ended", "tag"} {
 			allowed[key] = true
 		}
 		if !text(e["task"], 1, 10000) || !text(e["ledgerId"], 1, 128) {
 			return errors.New("invalid record")
+		}
+		// 标签是任务发生时的名称快照；删除候选标签不会改写历史任务。
+		if tag, exists := e["tag"]; exists && !text(tag, 1, 200) {
+			return errors.New("invalid record tag")
 		}
 		start, ok := number(e["started"])
 		if !ok || start < 0 || start >= 253402271999000 {
@@ -161,7 +165,7 @@ func validate(op Operation) error {
 			return errors.New("invalid archive")
 		}
 		kind, ok := content["kind"].(string)
-		if !ok || (kind != "ledger" && kind != "record") {
+		if !ok || (kind != "ledger" && kind != "record" && kind != "tag") {
 			return errors.New("invalid archive kind")
 		}
 		original, ok := content["entity"].(map[string]any)
@@ -389,7 +393,7 @@ func (s *Service) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"status":"ok","protocol":1}`)
+		io.WriteString(w, `{"status":"ok","protocol":2,"minimumClient":"0.4.0"}`)
 	})
 	slots := make(chan struct{}, 8)
 	mux.HandleFunc("POST /v1/sync", func(w http.ResponseWriter, r *http.Request) {
@@ -411,6 +415,11 @@ func (s *Service) handler() http.Handler {
 		var device string
 		if err := s.db.QueryRowContext(r.Context(), "SELECT id FROM devices WHERE token_hash=? AND revoked=0", hex.EncodeToString(hash[:])).Scan(&device); err != nil {
 			http.Error(w, `{"error":"unauthorized"}`, 401)
+			return
+		}
+		// 旧客户端不能识别标签实体和任务标签字段；在写入事务前拒绝以避免元数据丢失。
+		if r.Header.Get("X-Lyushi-Protocol") != "2" {
+			http.Error(w, `{"error":"client_upgrade_required","minimumClient":"0.4.0"}`, http.StatusUpgradeRequired)
 			return
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))
