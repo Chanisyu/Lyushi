@@ -20,6 +20,20 @@
 
 # 柳时 · Lyushi
 
+## 下载软件
+
+**[下载 0.4.0 测试版](https://github.com/Chanisyu/Lyushi/releases/tag/v0.4.0)** · [全部版本与更新说明](https://github.com/Chanisyu/Lyushi/releases) · [0.3.0 历史预览版](https://github.com/Chanisyu/Lyushi/releases/tag/v0.3.0)
+
+| 平台 | 已构建安装包 |
+| --- | --- |
+| Windows 11 x64 | [下载 ZIP](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi-windows-0.4.0-beta.zip)；完整解压后运行 `Lyushi-0.4.0/lyushi.exe` |
+| Android | [下载 APK](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi-android-0.4.0-beta.apk)；当前使用调试签名 |
+| Ubuntu 26.04 LTS amd64 | [下载 DEB](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi_0.4.0_amd64.deb) |
+| 自托管服务器 | [下载 Linux amd64 服务包](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi-server-0.4.0-linux-amd64.zip)；包含程序、部署配置和依赖许可 |
+
+在 Release 页面的 **Assets** 中选择上述文件。GitHub 自动提供的 **Source code** 是源码压缩包，不能直接安装。三端同步需自行部署服务器并填写设备密钥；0.3.0 不兼容当前协议，仅供历史归档。
+
+
 <font size="7"><b>
 你是否体验过这样的感觉：
 - 忙碌了一天，晚上坐下来却回想不起自己做了什么的挫败感。
@@ -76,7 +90,7 @@
 
 ## 安装
 
-当前版本为 **0.4.0**。现有交付文件保留 `beta` 文件名，表示发布成熟度，标签功能加入前三端服务器同步已由项目使用者人工验证成功，0.4.0 的验证范围见下文。公开仓库和下载地址尚未创建，本文不预设仓库名称或发布链接。
+当前版本为 **0.4.0**。现有交付文件保留 `beta` 文件名，表示发布成熟度，标签功能加入前三端服务器同步已由项目使用者人工验证成功，0.4.0 的验证范围见下文。公开安装包与版本说明见上方下载入口。
 
 | 平台 | 已验证环境 | 安装文件 |
 | --- | --- | --- |

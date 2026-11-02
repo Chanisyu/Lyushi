@@ -20,6 +20,20 @@
 
 # Lyushi · 柳时
 
+## Download
+
+**[Download 0.4.0 beta](https://github.com/Chanisyu/Lyushi/releases/tag/v0.4.0)** · [All releases](https://github.com/Chanisyu/Lyushi/releases) · [0.3.0 historical preview](https://github.com/Chanisyu/Lyushi/releases/tag/v0.3.0)
+
+| Platform | Prebuilt package |
+| --- | --- |
+| Windows 11 x64 | [ZIP](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi-windows-0.4.0-beta.zip); extract everything and run `Lyushi-0.4.0/lyushi.exe` |
+| Android | [APK](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi-android-0.4.0-beta.apk); currently debug-signed |
+| Ubuntu 26.04 LTS amd64 | [DEB](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi_0.4.0_amd64.deb) |
+| Self-hosted server | [Linux amd64 server bundle](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi-server-0.4.0-linux-amd64.zip), including deployment configuration and licenses |
+
+Choose these files under **Assets** on the release page. GitHub's automatic **Source code** downloads contain source files, not installers. Synchronization requires a self-hosted server and device keys. Version 0.3.0 is a historical archive and cannot synchronize with the current protocol.
+
+
 Lyushi is a personal time tracker that organizes entries into separate ledgers. It supports Android, Windows, and Ubuntu, stores data locally first, works offline, and can synchronize devices through a self-hosted server.
 
 Daily tracking consists of four steps: select a ledger, enter an activity, start tracking, and stop tracking. An active entry does not require the application to remain running. Closing and reopening the application restores the unfinished entry.
@@ -67,7 +81,7 @@ The English README documents the existing application; the application interface
 
 ## Installation
 
-The current version is **0.4.0**. Existing distribution filenames retain the `beta` suffix to indicate release maturity. The project user manually verified synchronization on all three platforms before the tag feature; verification coverage for 0.4.0 is described below. A public repository and download location have not yet been established; no repository name or release URL is assumed here.
+The current version is **0.4.0**. Existing distribution filenames retain the `beta` suffix to indicate release maturity. The project user manually verified synchronization on all three platforms before the tag feature; verification coverage for 0.4.0 is described below. Prebuilt packages and release notes are available through the download links above.
 
 | Platform | Verified environment | Installation file |
 | --- | --- | --- |
