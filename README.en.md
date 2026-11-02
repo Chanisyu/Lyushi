@@ -22,7 +22,7 @@
 
 ## Download
 
-**[Download 0.4.0 beta](https://github.com/Chanisyu/Lyushi/releases/tag/v0.4.0)** · [All releases](https://github.com/Chanisyu/Lyushi/releases) · [0.3.0 historical preview](https://github.com/Chanisyu/Lyushi/releases/tag/v0.3.0)
+**[Download 0.4.0 beta](https://github.com/Chanisyu/Lyushi/releases/tag/v0.4.0)** · [All releases](https://github.com/Chanisyu/Lyushi/releases) · [0.3.0 preview](https://github.com/Chanisyu/Lyushi/releases/tag/v0.3.0)
 
 | Platform | Prebuilt package |
 | --- | --- |
@@ -31,7 +31,7 @@
 | Ubuntu 26.04 LTS amd64 | [DEB](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi_0.4.0_amd64.deb) |
 | Self-hosted server | [Linux amd64 server bundle](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi-server-0.4.0-linux-amd64.zip), including deployment configuration and licenses |
 
-Choose these files under **Assets** on the release page. GitHub's automatic **Source code** downloads contain source files, not installers. Synchronization requires a self-hosted server and device keys. Version 0.3.0 is a historical archive and cannot synchronize with the current protocol.
+Choose these files under **Assets** on the release page. GitHub's automatic **Source code** downloads contain source files, not installers. Synchronization requires a self-hosted server and device keys. Version 0.3.0 uses an older synchronization protocol; upgrade to 0.4.0 to connect to the current server.
 
 
 Lyushi is a personal time tracker that organizes entries into separate ledgers. It supports Android, Windows, and Ubuntu, stores data locally first, works offline, and can synchronize devices through a self-hosted server.
@@ -54,7 +54,7 @@ The project's own source code and documentation are licensed under the [Apache L
 - [Backups, recovery, and device management](#backups-recovery-and-device-management)
 - [Project structure and module responsibilities](#project-structure-and-module-responsibilities)
 - [Building from source](#building-from-source)
-- [Testing and verification](#testing-and-verification)
+- [Running tests](#running-tests)
 - [Troubleshooting](#troubleshooting)
 - [License and contributions](#license-and-contributions)
 
@@ -81,7 +81,7 @@ The English README documents the existing application; the application interface
 
 ## Installation
 
-The current version is **0.4.0**. Existing distribution filenames retain the `beta` suffix to indicate release maturity. The project user manually verified synchronization on all three platforms before the tag feature; verification coverage for 0.4.0 is described below. Prebuilt packages and release notes are available through the download links above.
+The current version is **0.4.0**, available as a pre-release. Installation packages and release notes are linked above.
 
 | Platform | Verified environment | Installation file |
 | --- | --- | --- |
@@ -198,7 +198,7 @@ Version 0.4.0 adds tag entities and per-entry tag snapshots, raising the synchro
 
 Export JSON and back up the server database before upgrading, then update the server and all three clients. Existing databases, device keys, server identity, and pending operations are retained; no reset or new device registration is required. Older clients keep their local entries and can resume uploading after upgrading.
 
-New JSON backups use `formatVersion: 2`, including available tags and deletion states. New clients still accept version 1 backups; older clients should not import version 2. The 0.4.0 tag changes have been tested with local Qt clients, the Android emulator, and Ubuntu self-tests. The previously reported manual public-network verification predates the tag feature.
+New JSON backups use `formatVersion: 2`, including available tags and deletion states. New clients still accept version 1 backups; older clients should not import version 2. 
 
 ## Server deployment
 
@@ -405,11 +405,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o ../build/lyushi-serv
 
 Windows developers can set the same environment variables in PowerShell before running `go build`. `scripts/package-server.ps1 -GoExecutable <path-to-go.exe>` collects Go dependency licenses and packages an existing Linux server build. Generate `build/lyushi-server-linux-amd64` before running it.
 
-## Testing and verification
+## Running tests
 
-As of October 31, 2026, the project user reported successful synchronization with the actual server from Android, Windows, and Ubuntu. This is manual verification, not a claim that automated public-network integration tests passed. It does not establish exhaustive coverage of offline conflicts, long-running operation, or every supported OS version.
-
-Retained development checks include server unit tests, local synchronization between two actual Qt client processes, desktop storage and recovery self-tests, and Android storage-protocol checks using an isolated test database. Early prototypes, temporary databases, screenshots, process logs, and duplicate delivery documents are excluded from the public source distribution.
+The project includes server unit tests, desktop storage and recovery self-tests, local synchronization tests with two clients, and Android storage-protocol checks. Run tests with isolated databases and dedicated test devices.
 
 Server unit tests:
 
