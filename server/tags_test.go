@@ -79,7 +79,7 @@ func TestProtocolUpgradeGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(Request{Operations: []Operation{ledgerOp("rejected-ledger", "", "不应写入")}})
-	for _, version := range []string{"", "1", "3"} {
+	for _, version := range []string{"", "1", "2", "4"} {
 		r := httptest.NewRequest(http.MethodPost, "/v1/sync", bytes.NewReader(body))
 		r.Header.Set("Authorization", "Bearer "+key)
 		r.Header.Set("X-Lyushi-Protocol", version)

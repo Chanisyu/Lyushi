@@ -29,7 +29,11 @@ public:
     QString addTag(const QString &name);
     void deleteTag(const QString &name);
     void start(const QString &ledgerId, const QString &task, const QString &tag = {});
-    void finish(qint64 ended);
+    void finish(qint64 ended, const QString &expectedVersion = {});
+    /** 原子切换分心区间，严格校验发起操作时的任务版本。 */
+    void distract(const QString &task, const QString &tag, qint64 now, const QString &expectedVersion);
+    void resumeFocus(qint64 now, const QString &expectedVersion);
+    void editSegment(const QString &id, int index, const QString &task, const QString &tag, qint64 started, qint64 ended, const QString &expectedVersion);
     void editRecord(const QString &id, const QString &ledgerId, const QString &task, qint64 started, qint64 ended, const QString &expectedVersion = {}, const QString &tag = {});
     void deleteRecord(const QString &id);
     QJsonObject backup() const;
@@ -47,3 +51,11 @@ void ensure(bool condition, const QString &message);
 /** 校验不含活动状态的普通记录，拒绝非整数、反向或超范围时间。 */
 void validateRecord(const QJsonObject &record, bool allowRunning = false);
 void validateLedger(const QJsonObject &ledger);
+
+/** 主任务分段读取与有效时长计算，不修改数据库。 */
+QJsonArray taskSegments(const QJsonObject &record);
+bool isDistracted(const QJsonObject &record);
+qint64 focusDuration(const QJsonObject &record, qint64 now);
+QJsonObject segmentRecord(const QJsonObject &record, int index);
+/** 按服务端 JSON 转义规则计量，防止大量特殊字符导致本机接受而服务端拒绝。 */
+qint64 taskPayloadSize(const QJsonObject &record);

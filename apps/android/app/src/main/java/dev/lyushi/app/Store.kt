@@ -111,8 +111,11 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
         if (tag.isNotEmpty()) record.put("tag", tag)
         save("record", record)
     }
-    fun finish(ended: Long = System.currentTimeMillis()) = transaction {
-        val record = checkNotNull(active()) { "没有进行中的记录" }; record.put("ended", ended); validateRecord(record); save("record", record)
+    fun finish(ended: Long = System.currentTimeMillis(), expectedVersion: String? = null) = transaction {
+        val record = checkNotNull(active()) { "没有进行中的记录" }
+        check(expectedVersion == null || record.optString("version") == expectedVersion) { "任务已由其他设备更新，请核对后重试" }
+        if (record.has("segments")) { val parts = record.getJSONArray("segments"); parts.getJSONObject(parts.length()-1).put("ended", ended) }
+        record.put("ended", ended); validateRecord(record); save("record", record)
     }
     fun edit(id: String?, ledgerId: String, task: String, started: Long, ended: Long, expectedVersion: String? = null, tag: String? = null) = transaction {
         idle(); val ledger = checkNotNull(find("ledger", ledgerId)); check(!ledger.getBoolean("deleted"))
@@ -124,8 +127,60 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
             check(tag.isEmpty() || record.optString("tag") == tag || entities("tag").any { it.getString("name") == tag }) { "标签已被删除，请重新选择" }
             if (tag.isEmpty()) record.remove("tag") else record.put("tag", tag)
         }
+        check(!record.has("segments") || (record.getLong("started") == started && record.getLong("ended") == ended)) { "请在分段明细中修改起止时间" }
         record.put("ledgerId", ledgerId).put("task", task.trim()).put("started", started).put("ended", ended)
         validateRecord(record); save("record", record)
+    }
+    /** 关闭原专注区间并创建一层分心；整个切换仅写一个事务和一个记录版本。 */
+    fun distract(task: String, tag: String, now: Long, expectedVersion: String) = transaction {
+        val record = checkNotNull(active()); check(!isDistracted(record)) { "请先返回原任务" }
+        check(record.optString("version") == expectedVersion) { "任务已由其他设备更新，请核对后重试" }
+        check(tag.isEmpty() || entities("tag").any { it.getString("name") == tag }) { "标签已被删除，请重新选择" }
+        val parts = taskSegments(record); parts.last().put("ended", now)
+        val next = JSONObject().put("kind", "distraction").put("task", task.trim().ifEmpty { "分心" }).put("started", now).put("ended", JSONObject.NULL)
+        if (tag.isNotEmpty()) next.put("tag", tag)
+        record.put("segments", JSONArray(parts + next)); validateTransition(record); save("record", record)
+    }
+    /** 同一时间点结束分心并恢复原任务，版本检查阻止重复恢复和过期按钮操作。 */
+    fun resumeFocus(now: Long, expectedVersion: String) = transaction {
+        val record = checkNotNull(active()); check(isDistracted(record)) { "当前没有可结束的分心" }
+        check(record.optString("version") == expectedVersion) { "任务已由其他设备更新，请核对后重试" }
+        val parts = taskSegments(record); parts.last().put("ended", now)
+        record.put("segments", JSONArray(parts + JSONObject().put("kind", "focus").put("started", now).put("ended", JSONObject.NULL)))
+        validateTransition(record); save("record", record)
+    }
+    /** 为结束字段及版本外壳预留空间，分心过多时仍允许结束整个任务。 */
+    private fun validateTransition(record: JSONObject) {
+        check(taskPayloadSize(record) <= 500 * 1024) { "任务分段数据已达上限，请结束后新建任务" }
+        validateRecord(record, true)
+    }
+    /** 结束后的区间可以独立修改时间；修改分心不会重写原任务名称。 */
+    fun editSegment(id: String, index: Int, task: String, tag: String, started: Long, ended: Long, expectedVersion: String) = transaction {
+        idle(); val record = checkNotNull(find("record", id)); check(!record.getBoolean("deleted") && !record.isNull("ended"))
+        check(record.optString("version") == expectedVersion) { "记录已更新，请重新打开分段明细" }
+        val parts = taskSegments(record); check(index in parts.indices); val part = parts[index]
+        part.put("started", started).put("ended", ended)
+        val target = if (part.getString("kind") == "distraction") part else record
+        target.put("task", task.trim()); if (tag.isEmpty()) target.remove("tag") else target.put("tag", tag)
+        if (parts.size > 1) record.put("segments", JSONArray(parts))
+        record.put("started", parts.first().get("started")).put("ended", parts.last().get("ended"))
+        validateRecord(record); save("record", record)
+    }
+    /** 严格约束区间数量、体积、顺序和结束状态，确保聚合始终能够整体同步。 */
+    private fun validateSegments(record: JSONObject, allowRunning: Boolean) {
+        if (!record.has("segments")) return
+        check(record.get("segments") is JSONArray) { "分段格式无效" }; val parts = record.getJSONArray("segments").objects()
+        check(parts.size in 2..256 && taskPayloadSize(record) <= 512 * 1024) { "任务分段超过上限，请结束后新建任务" }
+        var previousEnd = record.getLong("started")
+        parts.forEachIndexed { i, part ->
+            val distraction = i % 2 == 1
+            onlyFields(part, if (distraction) setOf("kind","started","ended","task","tag") else setOf("kind","started","ended"))
+            check(part.getString("kind") == if (distraction) "distraction" else "focus") { "分心仅支持一层且必须与专注交替" }
+            val entry = segmentRecord(record, i); validateRecord(entry, allowRunning && i == parts.lastIndex)
+            check(entry.getLong("started") >= previousEnd && (i != 0 || entry.getLong("started") == record.getLong("started"))) { "分段时间重叠或顺序无效" }
+            previousEnd = if (entry.isNull("ended")) 0 else entry.getLong("ended")
+        }
+        check(parts.last().get("ended").toString() == record.get("ended").toString()) { "任务结束时间与最后区间不一致" }
     }
     fun deleteRecord(id: String) = transaction { idle(); save("record", checkNotNull(find("record", id)).put("deleted", true)) }
     fun conflicts(): List<JSONObject> = readableDatabase.rawQuery("SELECT payload FROM conflicts ORDER BY id", null).use { cursor ->
@@ -134,7 +189,7 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
     /** 状态栏只判断是否存在冲突，不在每秒刷新时读取全部存档。 */
     fun hasConflicts(): Boolean = readableDatabase.rawQuery("SELECT 1 FROM conflicts LIMIT 1",null).use { it.moveToFirst() }
     fun backup(): JSONObject {
-        idle(); return JSONObject().put("format", "lyushi.backup").put("formatVersion", 2).put("tags", JSONArray(entities("tag", true))).put("ledgers", JSONArray(entities("ledger", true)))
+        idle(); return JSONObject().put("format", "lyushi.backup").put("formatVersion", 3).put("tags", JSONArray(entities("tag", true))).put("ledgers", JSONArray(entities("ledger", true)))
             .put("records", JSONArray(entities("record", true))).put("conflicts", JSONArray(conflicts()))
     }
     /** 输入必须是整数 JSON 数值，不能用字符串、布尔或浮点时间冒充。 */
@@ -154,18 +209,19 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
     }
     internal fun validateRecord(entity: JSONObject, allowRunning: Boolean = false) {
         validateEntity(entity)
-        onlyFields(entity,setOf("id","ledgerId","task","started","ended","deleted","revision","version","tag"))
+        onlyFields(entity,setOf("id","ledgerId","task","started","ended","deleted","revision","version","tag","segments"))
         check(!entity.has("tag") || (entity.get("tag") is String && entity.getString("tag").isNotBlank() && entity.getString("tag").length <= 200)) { "任务标签无效" }
         check(entity.get("task") is String && entity.getString("task").isNotBlank() && entity.getString("task").length <= 10000) { "事项不能为空，且不能超过一万字" }
         check(entity.get("ledgerId") is String && entity.getString("ledgerId").length in 1..128) { "记录缺少有效账本编号" }
         val start = integer(entity, "started")
         check(start >= 0 && start < 253402271999000L) { "开始时间无效" }
+        validateSegments(entity, allowRunning)
         if (allowRunning && entity.has("ended") && entity.isNull("ended")) return
         val end = integer(entity, "ended"); check(end >= start && end < 253402271999000L) { "起止时间无效；结束不能早于开始" }
     }
     /** 整批校验与合并使用同一事务；冲突另存并参与备份，绝不以旧内容覆盖当前版本。 */
     fun importBackup(data: JSONObject): JSONObject = transaction {
-        idle(); check(data.getString("format") == "lyushi.backup" && (integer(data, "formatVersion") == 1L || (integer(data, "formatVersion") == 2L && data.opt("tags") is JSONArray))) { "不支持的备份格式" }
+        idle(); check(data.getString("format") == "lyushi.backup" && (integer(data, "formatVersion") == 1L || (integer(data, "formatVersion") in 2L..3L && data.opt("tags") is JSONArray))) { "不支持的备份格式" }
         val ledgers = data.getJSONArray("ledgers").objects(); val records = data.getJSONArray("records").objects()
         val ledgerIds = mutableSetOf<String>(); val recordIds = mutableSetOf<String>()
         ledgers.forEach { validateLedger(it); check(ledgerIds.add(it.getString("id"))) { "重复账本编号" } }
@@ -201,11 +257,15 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
         idle()
         fun quote(value: String): String { val safe = if (value.firstOrNull() in listOf('=', '+', '-', '@', '\t', '\r')) "'$value" else value; return "\"${safe.replace("\"", "\"\"")}\"" }
         return buildString {
-            append("\uFEFF账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号,标签\r\n")
+            append("\uFEFF账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号,标签,区间序号,区间类型\r\n")
             entities("record").filter { ledgerId == null || it.getString("ledgerId") == ledgerId }.forEach { record ->
                 val ledger = checkNotNull(find("ledger", record.getString("ledgerId")))
-                if (!ledger.getBoolean("deleted")) append(listOf(ledger.getString("name"), record.getString("task"), dateText(record.getLong("started"), true),
-                    dateText(record.getLong("ended"), true), java.lang.String.format(java.util.Locale.ROOT, "%.3f", (record.getLong("ended") - record.getLong("started")) / 1000.0), record.getString("id"), record.optString("tag")).joinToString(",") { quote(it) } + "\r\n")
+                // 每个区间单独导出，保留统一任务编号；不生成汇总行，避免表格求和重复计时。
+                if (!ledger.getBoolean("deleted")) taskSegments(record).forEachIndexed { index, part ->
+                    val row = segmentRecord(record, index)
+                    append(listOf(ledger.getString("name"), row.getString("task"), dateText(row.getLong("started"), true),
+                        dateText(row.getLong("ended"), true), java.lang.String.format(java.util.Locale.ROOT, "%.3f", (row.getLong("ended") - row.getLong("started")) / 1000.0), record.getString("id"), row.optString("tag"), (index+1).toString(), if (part.getString("kind") == "focus") "专注" else "分心").joinToString(",") { quote(it) } + "\r\n")
+                }
             }
         }
     }

@@ -31,7 +31,7 @@
 | Ubuntu 26.04 LTS amd64 | [DEB](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi_0.4.0_amd64.deb) |
 | Self-hosted server | [Linux amd64 server bundle](https://github.com/Chanisyu/Lyushi/releases/download/v0.4.0/lyushi-server-0.4.0-linux-amd64.zip), including deployment configuration and licenses |
 
-Choose these files under **Assets** on the release page. GitHub's automatic **Source code** downloads contain source files, not installers. Synchronization requires a self-hosted server and device keys. Version 0.3.0 uses an older synchronization protocol; upgrade to 0.4.0 to connect to the current server.
+Choose these files under **Assets** on the release page. GitHub's automatic **Source code** downloads contain source files, not installers. Synchronization requires a self-hosted server and device keys. The links above refer to the published 0.4.0 packages. The current source version is 0.5.0, which adds distraction tracking and task resumption and requires a protocol 3 server. Build instructions are provided below; future packages will appear on the releases page.
 
 
 Lyushi is a personal time tracker that organizes entries into separate ledgers. It supports Android, Windows, and Ubuntu, stores data locally first, works offline, and can synchronize devices through a self-hosted server.
@@ -49,7 +49,7 @@ The project's own source code and documentation are licensed under the [Apache L
 - [Initial configuration](#initial-configuration)
 - [Usage](#usage)
 - [Synchronization and data handling](#synchronization-and-data-handling)
-- [Upgrading to 0.4.0](#upgrading-to-040)
+- [Upgrading to 0.5.0](#upgrading-to-050)
 - [Server deployment](#server-deployment)
 - [Backups, recovery, and device management](#backups-recovery-and-device-management)
 - [Project structure and module responsibilities](#project-structure-and-module-responsibilities)
@@ -65,6 +65,7 @@ The project's own source code and documentation are licensed under the [Apache L
 | Separate ledgers | Create, select, rename, and delete ledgers; view each ledger's entries separately |
 | Task tags | One optional tag per entry, with selection, creation, deletion, and device synchronization |
 | Start and stop | Save actual start and end times and display elapsed seconds; no pause function |
+| Distraction and resumption | Track a temporary activity and return to the original task; exclude distractions from effective time |
 | Session recovery | Closing the application leaves the entry unfinished; reopening restores it |
 | Entry management | View activities, timestamps, and durations; add past entries, edit, or delete individual entries |
 | JSON backups | Export all ledgers; merge imports, deduplicate matching content, and preserve differing versions |
@@ -81,7 +82,7 @@ The English README documents the existing application; the application interface
 
 ## Installation
 
-The current version is **0.4.0**, available as a pre-release. Installation packages and release notes are linked above.
+The published packages are **0.4.0**. The current source version is **0.5.0**; builds produce `lyushi-windows-0.5.0-beta.zip`, `lyushi-android-0.5.0-beta.apk`, and `lyushi_0.5.0_amd64.deb`.
 
 | Platform | Verified environment | Installation file |
 | --- | --- | --- |
@@ -136,6 +137,18 @@ Keys are protected using Windows DPAPI, Android Keystore, and Ubuntu Secret Serv
 
 ## Usage
 
+### Distraction tracking and task resumption
+
+While a task is running, select “分心一下” and confirm a temporary activity and an optional existing tag. A blank activity defaults to “分心”; the default is no tag. The original task continues while the form is open. Cancelling makes no changes.
+
+During a distraction, the application displays the current distraction duration and the original task awaiting resumption. Select “结束分心并继续” to immediately resume the original activity and tag. Select “结束全部” and confirm to finish the entire task while preserving every interval. Repeated distractions are supported after resuming; nesting is limited to one level.
+
+Effective time includes only focus intervals: 20 minutes of focus, 5 minutes of distraction, and another 15 minutes of focus yield 35 effective minutes over a 40-minute elapsed period. History keeps one task summary with expandable intervals. Closing the app or working offline preserves the active phase, which can also be continued on another synchronized device.
+
+After completion, focus intervals share the original task's activity and tag. Distraction metadata can be edited independently. Edit interval timestamps from the interval view; gaps are allowed, while overlap, reversed order, and reopening completed intervals are rejected. Confirmed task deletion removes every interval together. Each task supports up to 256 intervals and a bounded payload; finish the task and start a new one when the limit is reached.
+
+CSV exports contain one row per focus or distraction interval, with a shared task ID, interval index, and interval type. No additional summary row is exported. Filter by “专注” to sum effective time.
+
 ### Track time
 
 1. Select or create a ledger.
@@ -176,7 +189,7 @@ Ledgers are identified by stable IDs. Matching names do not make two ledgers ide
 | Export all CSV (`导出全部 CSV`) | Export entries from all ledgers |
 | Import JSON (`导入 JSON`) | Merge backup data, deduplicate matching content, and retain differing content as conflict versions |
 
-CSV contains ledger names, activities, start and end times, durations in seconds, entry IDs, and tags. It is not a complete recovery format. CSV uses UTF-8 and handles spreadsheet formula prefixes. JSON imports are limited to 32 MiB per file; invalid formats, unknown fields, or invalid timestamps roll back the entire import.
+CSV contains ledger names, activities, start and end times, durations in seconds, entry IDs, tags, interval indices, and interval types. Each interval has one row and shares its task ID with the other intervals. It is not a complete recovery format. CSV uses UTF-8 and handles spreadsheet formula prefixes. JSON imports are limited to 32 MiB per file; invalid formats, unknown fields, or invalid timestamps roll back the entire import.
 
 Import is a merge, not a destructive reset-and-restore operation. Older backups do not directly override known deletions, and historical unfinished versions do not automatically become active timers. Before migrating, export JSON from the original device, import and verify it on the new device, and then configure synchronization.
 
@@ -192,13 +205,13 @@ Deletions propagate to other devices, but the current implementation uses logica
 
 Clients retain the server identity and synchronization cursor. Reinitializing a server or changing to a different server can trigger identity protection; changing the URL alone is not a migration procedure. See the [synchronization protocol](docs/sync-protocol.md), currently maintained in Chinese.
 
-## Upgrading to 0.4.0
+## Upgrading to 0.5.0
 
-Version 0.4.0 adds tag entities and per-entry tag snapshots, raising the synchronization capability version to 2. Clients send `X-Lyushi-Protocol: 2`. Before starting a write transaction, the server rejects older clients without this capability using HTTP 426.
+Version 0.5.0 adds intervals within a task and requires synchronization protocol 3. Clients send `X-Lyushi-Protocol: 3`; health checks report `protocol=3` and `minimumClient=0.5.0`. Older clients receive HTTP 426 before any synchronization transaction.
 
-Export JSON and back up the server database before upgrading, then update the server and all three clients. Existing databases, device keys, server identity, and pending operations are retained; no reset or new device registration is required. Older clients keep their local entries and can resume uploading after upgrading.
+Back up client JSON and the server database before upgrading the server and all clients. Existing entries, device keys, server identity, cursors, and pending operations are retained. Old entries are read as a single focus interval until the first distraction is recorded. No database reset or device registration is required.
 
-New JSON backups use `formatVersion: 2`, including available tags and deletion states. New clients still accept version 1 backups; older clients should not import version 2.
+JSON backups use format 3 and preserve all focus and distraction intervals. Formats 1 and 2 remain importable. Do not import the new format into older clients. Upgrade clients before uploading their remaining offline changes.
 
 ## Server deployment
 

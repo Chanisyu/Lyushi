@@ -9,6 +9,7 @@ import org.json.JSONObject
  * 场景覆盖远端接手、并发、分页保护、删除、备份隔离及响应失败的事务回滚。
  */
 internal fun runSyncChecks(context: Context): JSONObject {
+    runFocusChecks(context)
     context.deleteDatabase("protocol-check.sqlite")
     return Store(context,"protocol-check.sqlite").use { store ->
         var sequence = 0L
@@ -98,6 +99,6 @@ internal fun runSyncChecks(context: Context): JSONObject {
             val request = batch.syncRequest(); val count = request.getJSONArray("operations").length()
             check(count in 1..49 && canonical(request).toByteArray(Charsets.UTF_8).size < 2*1024*1024)
         }
-        JSONObject().put("passed",true).put("appVersion",BuildConfig.VERSION_NAME).put("versionCode",BuildConfig.VERSION_CODE).put("checks",JSONArray(listOf("unchanged poll","remote stop","concurrent branches","stale edit protection","pagination protection","known-branch delete","backup quarantine","transaction rollback","server identity","unknown field rejection","bounded batches","tag lifecycle and backup compatibility")))
+        JSONObject().put("passed",true).put("appVersion",BuildConfig.VERSION_NAME).put("versionCode",BuildConfig.VERSION_CODE).put("checks",JSONArray(listOf("unchanged poll","remote stop","concurrent branches","stale edit protection","pagination protection","known-branch delete","backup quarantine","transaction rollback","server identity","unknown field rejection","bounded batches","tag lifecycle and backup compatibility","distraction transitions, restart, effective duration, segment editing and backup")))
     }
 }

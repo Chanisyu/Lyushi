@@ -134,7 +134,7 @@ func validate(op Operation) error {
 			return errors.New("invalid ledger name")
 		}
 	case "record":
-		for _, key := range []string{"task", "ledgerId", "started", "ended", "tag"} {
+		for _, key := range []string{"task", "ledgerId", "started", "ended", "tag", "segments"} {
 			allowed[key] = true
 		}
 		if !text(e["task"], 1, 10000) || !text(e["ledgerId"], 1, 128) {
@@ -157,6 +157,9 @@ func validate(op Operation) error {
 			if !ok || n < start || n >= 253402271999000 {
 				return errors.New("invalid end")
 			}
+		}
+		if err := validateFocusSegments(e); err != nil {
+			return err
 		}
 	case "archive":
 		allowed["content"] = true
@@ -393,7 +396,7 @@ func (s *Service) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"status":"ok","protocol":2,"minimumClient":"0.4.0"}`)
+		io.WriteString(w, `{"status":"ok","protocol":3,"minimumClient":"0.5.0"}`)
 	})
 	slots := make(chan struct{}, 8)
 	mux.HandleFunc("POST /v1/sync", func(w http.ResponseWriter, r *http.Request) {
@@ -417,9 +420,9 @@ func (s *Service) handler() http.Handler {
 			http.Error(w, `{"error":"unauthorized"}`, 401)
 			return
 		}
-		// 旧客户端不能识别标签实体和任务标签字段；在写入事务前拒绝以避免元数据丢失。
-		if r.Header.Get("X-Lyushi-Protocol") != "2" {
-			http.Error(w, `{"error":"client_upgrade_required","minimumClient":"0.4.0"}`, http.StatusUpgradeRequired)
+		// 旧客户端不能识别完整任务分段；在写入事务前拒绝以避免元数据丢失。
+		if r.Header.Get("X-Lyushi-Protocol") != "3" {
+			http.Error(w, `{"error":"client_upgrade_required","minimumClient":"0.5.0"}`, http.StatusUpgradeRequired)
 			return
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))

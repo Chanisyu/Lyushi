@@ -58,9 +58,10 @@ class Window : public QWidget {
     QPushButton *addTagButton, *deleteTagButton;
     QLineEdit *task;
     QLabel *clock, *elapsed, *status;
-    QPushButton *action, *details, *add;
+    QPushButton *action, *details, *add, *distractionButton, *finishAllButton;
+    QLabel *focusHint;
     QString selected;
-    QString actionRecordAtPress;
+    QString actionRecordAtPress, actionVersionAtPress;
 
     /** 下拉项保存原始名称，历史已删除标签仅在编辑原记录时作为快照显示。 */
     void fillTags(QComboBox *choice, const QString &selectedTag)
@@ -85,7 +86,7 @@ class Window : public QWidget {
         int index = ledgers->findData(selected); if (index < 0) index = ledgers->count() ? 0 : -1;
         ledgers->setCurrentIndex(index); selected = ledgers->currentData().toString();
         QSettings().setValue("ledger", selected);
-        const auto tag = current.isEmpty() ? tags->currentData().toString() : current["tag"].toString();
+        const auto tag = current.isEmpty() ? tags->currentData().toString() : (isDistracted(current) ? taskSegments(current).last().toObject()["tag"].toString() : current["tag"].toString());
         // 普通新任务不保留被另一设备删除的候选；进行中记录继续展示其历史快照。
         bool live = tag.isEmpty(); for (const auto &value : store.entities("tag")) if (value.toObject()["name"].toString() == tag) live = true;
         fillTags(tags, !current.isEmpty() || live ? tag : QStringLiteral("")); refresh();
@@ -100,30 +101,55 @@ class Window : public QWidget {
         tags->setEnabled(!running); addTagButton->setEnabled(!running);
         deleteTagButton->setEnabled(!running && !tags->currentData().toString().isEmpty());
         task->setEnabled(!running); action->setEnabled(running || !selected.isEmpty());
-        action->setText(running ? QStringLiteral("结束记录") : QStringLiteral("开始记录"));
-        if (running && task->text() != current["task"].toString()) task->setText(current["task"].toString());
-        elapsed->setText(running ? durationText(now - current["started"].toInteger()) : "00:00:00");
-        status->setText(running && now < current["started"].toInteger() ? QStringLiteral("设备时间早于开始时间，请核对系统时间") :
+        const bool distracted = isDistracted(current);
+        action->setText(distracted ? QStringLiteral("结束分心并继续") : running ? QStringLiteral("结束记录") : QStringLiteral("开始记录"));
+        distractionButton->setVisible(running && !distracted); finishAllButton->setVisible(distracted);
+        focusHint->setText(distracted ? QStringLiteral("分心中 · 待恢复：%1").arg(current["task"].toString()) : running ? QStringLiteral("原任务累计有效时长") : QString{});
+        const auto visible = running ? segmentRecord(current, taskSegments(current).size()-1) : QJsonObject{};
+        if (running) task->setText(visible["task"].toString());
+        elapsed->setText(running ? durationText(distracted ? now - visible["started"].toInteger() : focusDuration(current, now)) : "00:00:00");
+        status->setText(running && now < visible["started"].toInteger() ? QStringLiteral("设备时间早于开始时间，请核对系统时间") :
             sync.status + (store.hasConflicts() ? QStringLiteral(" · 已保留冲突版本") : ""));
     }
-    /** 新建和修改共用精确到秒的北京时间表单；保存校验在存储层再次执行。 */
-    void edit(QWidget *owner, const QJsonObject &record = {})
+    /** 新建和修改共用毫秒精度的北京时间表单，避免只改文字时截断区间边界；保存校验在存储层再次执行。 */
+    void edit(QWidget *owner, const QJsonObject &record = {}, int segment = -1)
     {
         QDialog dialog(owner); dialog.setWindowTitle(record.isEmpty() ? QStringLiteral("补记") : QStringLiteral("修改记录"));
-        QFormLayout layout(&dialog); QPlainTextEdit text(record["task"].toString()); text.setMinimumWidth(330);
-        QComboBox tagChoice; fillTags(&tagChoice, record["tag"].toString());
+        const auto display = segment < 0 ? record : segmentRecord(record, segment);
+        QFormLayout layout(&dialog); QPlainTextEdit text(display["task"].toString()); text.setMinimumWidth(330);
+        QComboBox tagChoice; fillTags(&tagChoice, display["tag"].toString());
         layout.addRow(QStringLiteral("标签"), &tagChoice);
         QDateTimeEdit begin, end;
-        for (auto *input : {&begin, &end}) { input->setTimeZone(beijing()); input->setDisplayFormat("yyyy-MM-dd HH:mm:ss"); input->setCalendarPopup(true); }
+        for (auto *input : {&begin, &end}) { input->setTimeZone(beijing()); input->setDisplayFormat("yyyy-MM-dd HH:mm:ss.zzz"); input->setCalendarPopup(true); }
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        begin.setDateTime(QDateTime::fromMSecsSinceEpoch(record.isEmpty() ? now - 60000 : record["started"].toInteger(), beijing()));
-        end.setDateTime(QDateTime::fromMSecsSinceEpoch(record.isEmpty() ? now : record["ended"].toInteger(), beijing()));
+        begin.setDateTime(QDateTime::fromMSecsSinceEpoch(record.isEmpty() ? now - 60000 : display["started"].toInteger(), beijing()));
+        end.setDateTime(QDateTime::fromMSecsSinceEpoch(record.isEmpty() ? now : display["ended"].toInteger(), beijing()));
+        if (segment < 0 && record.contains("segments")) { begin.setEnabled(false); end.setEnabled(false); layout.addRow(new QLabel(QStringLiteral("起止时间请在分段明细中修改；事项与标签应用到全部专注区间。"))); }
         layout.addRow(QStringLiteral("事项"), &text); layout.addRow(QStringLiteral("开始（北京时间）"), &begin); layout.addRow(QStringLiteral("结束（北京时间）"), &end);
         QDialogButtonBox buttons(QDialogButtonBox::Save | QDialogButtonBox::Cancel); layout.addRow(&buttons);
         connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] { safely(&dialog, [&] {
-            store.editRecord(record["id"].toString(), selected, text.toPlainText(), begin.dateTime().toMSecsSinceEpoch(), end.dateTime().toMSecsSinceEpoch(), record["version"].toString(), tagChoice.currentData().toString()); dialog.accept(); }); });
+            if (segment >= 0) store.editSegment(record["id"].toString(), segment, text.toPlainText(), tagChoice.currentData().toString(), begin.dateTime().toMSecsSinceEpoch(), end.dateTime().toMSecsSinceEpoch(), record["version"].toString());
+            else store.editRecord(record["id"].toString(), selected, text.toPlainText(), begin.dateTime().toMSecsSinceEpoch(), end.dateTime().toMSecsSinceEpoch(), record["version"].toString(), tagChoice.currentData().toString()); dialog.accept(); }); });
         dialog.exec();
+    }
+    /** 展开主任务的时间区间，不额外插入汇总行参与时长统计。 */
+    void showSegments(QWidget *owner, const QString &id)
+    {
+        QDialog dialog(owner); dialog.setWindowTitle(QStringLiteral("分段明细")); dialog.resize(820, 460);
+        QVBoxLayout layout(&dialog); QTableWidget table; table.setColumnCount(6);
+        table.setHorizontalHeaderLabels({QStringLiteral("类型"),QStringLiteral("事项"),QStringLiteral("开始"),QStringLiteral("结束"),QStringLiteral("时长"),QStringLiteral("标签")});
+        table.setSelectionBehavior(QAbstractItemView::SelectRows); table.setSelectionMode(QAbstractItemView::SingleSelection); table.setEditTriggers(QAbstractItemView::NoEditTriggers); layout.addWidget(&table);
+        QJsonObject current;
+        auto fill = [&] { for (const auto &entry : store.entities("record")) if (entry.toObject()["id"].toString() == id) current = entry.toObject();
+            table.setRowCount(taskSegments(current).size());
+            for (int i=0; i<table.rowCount(); ++i) { const auto part = segmentRecord(current,i);
+                const QStringList values{taskSegments(current)[i].toObject()["kind"] == "focus" ? QStringLiteral("专注") : QStringLiteral("分心"),part["task"].toString(),dateText(part["started"].toInteger()),dateText(part["ended"].toInteger()),durationText(part["ended"].toInteger()-part["started"].toInteger()),part["tag"].toString()};
+                for (int c=0;c<values.size();++c) table.setItem(i,c,new QTableWidgetItem(values[c]));
+            } table.resizeColumnsToContents(); };
+        QPushButton modify(QStringLiteral("修改所选区间")); layout.addWidget(&modify);
+        connect(&modify,&QPushButton::clicked,&dialog,[&] { safely(&dialog,[&] { ensure(table.currentRow()>=0,QStringLiteral("请先选择区间")); edit(&dialog,current,table.currentRow()); fill(); }); });
+        fill(); dialog.exec();
     }
     /** 冲突中的原始版本以只读方式展示，第一版不擅自决定用哪一方覆盖。 */
     void showConflicts(QWidget *owner)
@@ -139,6 +165,9 @@ class Window : public QWidget {
             if ((content["kind"].toString() == "ledger" || content["kind"].toString() == "tag")) lines << QStringLiteral("名称：%1").arg(entity["name"].toString());
             else lines << entity["task"].toString() << QStringLiteral("标签：%1").arg(entity["tag"].toString()) << QStringLiteral("账本：%1").arg(names.value(entity["ledgerId"].toString(), QStringLiteral("已删除或未知账本")))
                 << QStringLiteral("开始：%1").arg(dateText(entity["started"].toInteger())) << (entity["ended"].isNull() ? QStringLiteral("结束：此版本尚未结束（存档）") : QStringLiteral("结束：%1").arg(dateText(entity["ended"].toInteger())));
+            // 冲突分支完整展示其区间，不将不同分支的时长合并到当前任务。
+            if (entity.contains("segments")) for (int i=0; i<taskSegments(entity).size(); ++i) { const auto part = segmentRecord(entity,i);
+                lines << QStringLiteral("%1 · %2 · %3 → %4 · 标签：%5").arg(taskSegments(entity)[i].toObject()["kind"] == "focus" ? QStringLiteral("专注") : QStringLiteral("分心"),part["task"].toString(),dateText(part["started"].toInteger()),part["ended"].isNull() ? QStringLiteral("尚未结束（存档）") : dateText(part["ended"].toInteger()),part["tag"].toString()); }
             lines << "";
         }
         QPlainTextEdit text; text.setReadOnly(true); text.setPlainText(lines.isEmpty() ? QStringLiteral("没有保留的冲突。") : lines.join('\n')); layout.addWidget(&text);
@@ -169,7 +198,7 @@ class Window : public QWidget {
     {
         if (!store.active().isEmpty()) return;
         QDialog dialog(this); dialog.setWindowTitle(ledgers->currentText()); dialog.resize(780, 540); QVBoxLayout layout(&dialog);
-        QTableWidget table; table.setColumnCount(5); table.setHorizontalHeaderLabels({QStringLiteral("事项"), QStringLiteral("开始"), QStringLiteral("结束"), QStringLiteral("时长"), QStringLiteral("标签")});
+        QTableWidget table; table.setColumnCount(5); table.setHorizontalHeaderLabels({QStringLiteral("事项"), QStringLiteral("开始"), QStringLiteral("结束"), QStringLiteral("有效时长"), QStringLiteral("标签")});
         table.setSelectionBehavior(QAbstractItemView::SelectRows); table.setSelectionMode(QAbstractItemView::SingleSelection); table.setEditTriggers(QAbstractItemView::NoEditTriggers);
         table.horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents); table.horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch); layout.addWidget(&table);
         QJsonArray records;
@@ -179,15 +208,16 @@ class Window : public QWidget {
             std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a["started"].toInteger() > b["started"].toInteger(); });
             table.setRowCount(sorted.size()); int row = 0;
             for (const auto &record : sorted) { records.append(record);
-                const QStringList columns{record["task"].toString(), dateText(record["started"].toInteger()), dateText(record["ended"].toInteger()), durationText(record["ended"].toInteger() - record["started"].toInteger()), record["tag"].toString()};
+                const QStringList columns{record["task"].toString(), dateText(record["started"].toInteger()), dateText(record["ended"].toInteger()), durationText(focusDuration(record, record["ended"].toInteger())), record["tag"].toString()};
                 for (int c = 0; c < columns.size(); ++c) table.setItem(row, c, new QTableWidgetItem(columns[c])); ++row; }
         };
         auto chosen = [&] { ensure(table.currentRow() >= 0, QStringLiteral("请先选择一条记录")); return records.at(table.currentRow()).toObject(); };
         auto *row = new QHBoxLayout; layout.addLayout(row);
         auto button = [&](const QString &text, const std::function<void()> &callback) { auto *b = new QPushButton(text); row->addWidget(b); connect(b, &QPushButton::clicked, &dialog, [&, callback] { safely(&dialog, callback); }); };
         button(QStringLiteral("补记"), [&] { edit(&dialog); fill(); });
+        button(QStringLiteral("查看分段"), [&] { showSegments(&dialog, chosen()["id"].toString()); fill(); });
         button(QStringLiteral("修改"), [&] { edit(&dialog, chosen()); fill(); });
-        button(QStringLiteral("删除记录"), [&] { const auto record = chosen(); if (QMessageBox::question(&dialog, QStringLiteral("删除记录"), record["task"].toString() + QStringLiteral("\n确认删除这条记录？")) == QMessageBox::Yes) { store.deleteRecord(record["id"].toString()); fill(); } });
+        button(QStringLiteral("删除记录"), [&] { const auto record = chosen(); if (QMessageBox::question(&dialog, QStringLiteral("删除记录"), record["task"].toString() + QStringLiteral("\n确认删除整个任务及全部专注、分心区间？")) == QMessageBox::Yes) { store.deleteRecord(record["id"].toString()); fill(); } });
         button(QStringLiteral("改名"), [&] { bool ok; const auto name = QInputDialog::getText(&dialog, QStringLiteral("账本改名"), QStringLiteral("账本名称"), QLineEdit::Normal, ledgers->currentText(), &ok); if (ok) { store.renameLedger(selected, name); reload(); dialog.setWindowTitle(ledgers->currentText()); } });
         button(QStringLiteral("删除账本"), [&] { bool ok; const auto name = ledgers->currentText(); const auto answer = QInputDialog::getText(&dialog, QStringLiteral("删除整个账本"), QStringLiteral("将删除 %1 条记录。输入账本名“%2”确认：").arg(records.size()).arg(name), QLineEdit::Normal, {}, &ok);
             if (ok) { ensure(answer == name, QStringLiteral("名称不一致，未删除")); store.deleteLedger(selected); dialog.accept(); } });
@@ -255,16 +285,33 @@ public:
         }); });
         elapsed = new QLabel; elapsed->setStyleSheet("font-size:40px"); elapsed->setAlignment(Qt::AlignCenter); layout->addWidget(elapsed);
         action = new QPushButton; action->setMinimumHeight(48); layout->addWidget(action);
+        focusHint = new QLabel; focusHint->setWordWrap(true); layout->addWidget(focusHint);
+        distractionButton = new QPushButton(QStringLiteral("分心一下")); layout->addWidget(distractionButton);
+        finishAllButton = new QPushButton(QStringLiteral("结束全部")); layout->addWidget(finishAllButton);
+        connect(distractionButton,&QPushButton::clicked,this,[this] { safely(this,[this] {
+            const auto current = store.active(); ensure(!current.isEmpty() && !isDistracted(current),QStringLiteral("当前无法分心"));
+            QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("分心一下")); QFormLayout form(&dialog);
+            QLineEdit name; name.setMaxLength(10000); name.setPlaceholderText(QStringLiteral("留空记为分心")); QComboBox choice; fillTags(&choice,QStringLiteral(""));
+            form.addRow(QStringLiteral("分心事项"),&name); form.addRow(QStringLiteral("标签"),&choice);
+            QDialogButtonBox buttons(QDialogButtonBox::Ok|QDialogButtonBox::Cancel); form.addRow(&buttons);
+            connect(&buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+            connect(&buttons,&QDialogButtonBox::accepted,&dialog,[&] { safely(&dialog,[&] { store.distract(name.text(),choice.currentData().toString(),QDateTime::currentMSecsSinceEpoch(),current["version"].toString()); dialog.accept(); }); });
+            if (dialog.exec()==QDialog::Accepted) { reload(); sync.request(); }
+        }); });
+        connect(finishAllButton,&QPushButton::clicked,this,[this] { safely(this,[this] {
+            const auto version=store.active()["version"].toString();
+            if (QMessageBox::question(this,QStringLiteral("结束全部"),QStringLiteral("结束分心和本次任务？已记录的所有时间区间将保留。"))==QMessageBox::Yes) { store.finish(QDateTime::currentMSecsSinceEpoch(),version); task->clear(); reload(); sync.request(); }
+        }); });
         details = new QPushButton(QStringLiteral("账本明细与管理")); layout->addWidget(details);
         auto *importButton = new QPushButton(QStringLiteral("从 JSON 备份恢复")); layout->addWidget(importButton);
         status = new QLabel; status->setWordWrap(true); layout->addWidget(status);
         connect(add, &QPushButton::clicked, this, [&] { safely(this, [&] { bool ok; const auto name = QInputDialog::getText(this, QStringLiteral("新建账本"), QStringLiteral("账本名称"), QLineEdit::Normal, {}, &ok); if (ok) { selected = store.addLedger(name); reload(); } }); });
         connect(ledgers, &QComboBox::currentIndexChanged, this, [&] { selected = ledgers->currentData().toString(); QSettings().setValue("ledger", selected); });
         // 按下和释放按钮之间若远端改变了状态，拒绝把“结束”误解释成“开始”。
-        connect(action, &QPushButton::pressed, this, [this] { actionRecordAtPress = store.active()["id"].toString(); });
+        connect(action, &QPushButton::pressed, this, [this] { actionRecordAtPress = store.active()["id"].toString(); actionVersionAtPress = store.active()["version"].toString(); });
         connect(action, &QPushButton::clicked, this, [&] { safely(this, [&] {
             ensure(actionRecordAtPress == store.active()["id"].toString(), QStringLiteral("计时状态已由其他设备改变，请核对页面后再操作"));
-            if (store.active().isEmpty()) store.start(selected, task->text(), tags->currentData().toString()); else { store.finish(QDateTime::currentMSecsSinceEpoch()); task->clear(); } reload(); sync.request();
+            if (store.active().isEmpty()) store.start(selected, task->text(), tags->currentData().toString()); else if (isDistracted(store.active())) store.resumeFocus(QDateTime::currentMSecsSinceEpoch(),actionVersionAtPress); else { store.finish(QDateTime::currentMSecsSinceEpoch(),actionVersionAtPress); task->clear(); } reload(); sync.request();
         }); });
         connect(details, &QPushButton::clicked, this, [&] { safely(this, [&] { showDetails(); }); });
         connect(settingsButton, &QPushButton::clicked, this, [&] { settings(); });
@@ -285,8 +332,10 @@ public:
 };
 
 /** 自检使用调用者指定的隔离目录，覆盖跨进程恢复、账本隔离、删除传播数据与导入回滚。 */
+void focusSelfTest(const QString &directory);
 static void selfTest(Store &store, const QString &directory)
 {
+    focusSelfTest(directory);
     ensure(QCoreApplication::translate("QPlatformTheme", "Save") == QStringLiteral("保存"), "Chinese standard buttons unavailable");
     // 标签自检独立于既有记录计数，覆盖删候选保历史、去重、重建及 v1 备份读取。
     Store tagged(QDir(directory).filePath("tag-check")); const auto taggedBook = tagged.addLedger("标签测试");
@@ -335,7 +384,7 @@ static void selfTest(Store &store, const QString &directory)
 
 int main(int argc, char **argv)
 {
-    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.4.0");
+    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.5.0");
     QLocale::setDefault(QLocale(QLocale::Chinese, QLocale::China));
     SimplifiedChineseTranslator translator; app.installTranslator(&translator);
     // 命令行检查和截图的设置也使用隔离目录，不覆盖日常使用时选择的账本或主题。
@@ -386,7 +435,10 @@ int main(int argc, char **argv)
             else if (action == "delete-tag") store.deleteTag(command["name"].toString());
             else if (action == "tag-record") store.editRecord(command["id"].toString(), command["ledgerId"].toString(), command["task"].toString(), command["started"].toInteger(), command["ended"].toInteger(), {}, command["tag"].toString());
             else if (action == "delete-ledger") store.deleteLedger(command["id"].toString());
-            else if (action == "finish") store.finish(QDateTime::currentMSecsSinceEpoch());
+            // 验收入口仍调用正式存储接口，版本与时间校验不会在测试模式中绕过。
+            else if (action == "distract") store.distract(command["task"].toString(), command["tag"].toString(), command["now"].toInteger(QDateTime::currentMSecsSinceEpoch()), store.active()["version"].toString());
+            else if (action == "resume-focus") store.resumeFocus(command["now"].toInteger(QDateTime::currentMSecsSinceEpoch()), store.active()["version"].toString());
+            else if (action == "finish") store.finish(command["now"].toInteger(QDateTime::currentMSecsSinceEpoch()));
             else ensure(false, "unsupported command"); return 0;
         }
         if (mode == "--sync-once") {

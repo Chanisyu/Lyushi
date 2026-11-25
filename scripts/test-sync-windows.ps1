@@ -48,7 +48,23 @@ try {
     Invoke-Client '--sync-once' $two @($address,$keyFile)
     $second=Inspect-Client $two
     if (@($second.records).Count -ne 1 -or $null -ne $second.records[0].ended) { throw '另一客户端未收到进行中状态' }
-    Invoke-Client '--resume-active' $two
+    # 原任务在设备一分心、设备二恢复，所有状态切换共用同一记录编号。
+    $focusCommand = Join-Path $sandbox 'focus-command.json'
+    $start = $second.records[0].started
+    @{action='distract';task='点饭';now=($start+1000)} | ConvertTo-Json | Set-Content -LiteralPath $focusCommand -Encoding UTF8
+    Invoke-Client '--command' $one @($focusCommand)
+    Invoke-Client '--sync-once' $one @($address,$keyFile); Invoke-Client '--sync-once' $two @($address,$keyFile)
+    $distracted=(Inspect-Client $two).records[0]
+    if ($distracted.id -ne $second.records[0].id -or $distracted.segments[-1].kind -ne 'distraction') { throw '分心状态未完整跨端同步' }
+    @{action='resume-focus';now=($start+2000)} | ConvertTo-Json | Set-Content -LiteralPath $focusCommand -Encoding UTF8
+    Invoke-Client '--command' $two @($focusCommand)
+    Invoke-Client '--sync-once' $two @($address,$keyFile); Invoke-Client '--sync-once' $one @($address,$keyFile)
+    $resumed=(Inspect-Client $one).records[0]
+    if ($resumed.segments.Count -ne 3 -or $resumed.segments[-1].kind -ne 'focus') { throw '恢复状态未完整跨端同步' }
+    # 使用固定边界结束，避免测试执行速度影响恢复后区间长度。
+    @{action='finish';now=($start+3000)} | ConvertTo-Json | Set-Content -LiteralPath $focusCommand -Encoding UTF8
+    Invoke-Client '--command' $two @($focusCommand)
+
     Invoke-Client '--sync-once' $two @($address,$keyFile)
     Invoke-Client '--sync-once' $one @($address,$keyFile)
     $first=Inspect-Client $one
@@ -72,7 +88,7 @@ try {
             $operations+=@{id=$version;kind='record';entityId=$base.id;parents=@($parent);entity=$entity}; $parent=$version
         }
         $body=@{serverId=$serverId;cursor=$cursor;operations=$operations}|ConvertTo-Json -Depth 9 -Compress
-        $reply=Invoke-RestMethod "$address/v1/sync" -Method Post -Headers @{Authorization="Bearer $token";"X-Lyushi-Protocol"="2"} -ContentType application/json -Body $body
+        $reply=Invoke-RestMethod "$address/v1/sync" -Method Post -Headers @{Authorization="Bearer $token";"X-Lyushi-Protocol"="3"} -ContentType application/json -Body $body
         $serverId=$reply.serverId; $cursor=$reply.cursor
     }
     Apply-Edit $one $base 'pending-across-pages'
@@ -101,7 +117,7 @@ try {
     $delete=Join-Path $sandbox 'delete.json'; @{action='delete';id=$base.id}|ConvertTo-Json|Set-Content -LiteralPath $delete -Encoding UTF8
     Invoke-Client '--command' $one @($delete); Invoke-Client '--sync-once' $one @($address,$keyFile); Invoke-Client '--sync-once' $two @($address,$keyFile)
     if (-not ((Inspect-Client $two).records | Where-Object {$_.id -eq $base.id}).deleted) { throw '删除未传播' }
-    $summary=@{passed=$true;tagLifecycle=$true;crossDeviceStop=$true;offlineBranches=$true;paginationProtectsPending=$true;deletePropagation=$true;directory=$sandbox}
+    $summary=@{passed=$true;tagLifecycle=$true;distractionCrossDevice=$true;crossDeviceStop=$true;offlineBranches=$true;paginationProtectsPending=$true;deletePropagation=$true;directory=$sandbox}
     $summary|ConvertTo-Json|Set-Content -LiteralPath "$projectDirectory/build/sync-local-result.json" -Encoding UTF8
     $summary|ConvertTo-Json
 } finally {

@@ -47,7 +47,7 @@ void validateLedger(const QJsonObject &ledger)
 void validateRecord(const QJsonObject &record, bool allowRunning)
 {
     validateEntity(record);
-    onlyFields(record, {"id", "ledgerId", "task", "started", "ended", "deleted", "revision", "version", "tag"});
+    onlyFields(record, {"id", "ledgerId", "task", "started", "ended", "deleted", "revision", "version", "tag", "segments"});
     // 无标签的旧记录不添加空字段；已有快照必须是有界字符串。
     ensure(!record.contains("tag") || (record["tag"].isString() && !record["tag"].toString().trimmed().isEmpty() && record["tag"].toString().size() <= 200), QStringLiteral("任务标签无效"));
     ensure(record["task"].isString() && !record["task"].toString().trimmed().isEmpty() && record["task"].toString().size() <= 10000,
@@ -56,6 +56,20 @@ void validateRecord(const QJsonObject &record, bool allowRunning)
     ensure(integer(record["started"]) && record["started"].toInteger() >= 0 && record["started"].toInteger() < 253402271999000LL
            && ((allowRunning && record["ended"].isNull()) || (integer(record["ended"]) && record["ended"].toInteger() >= record["started"].toInteger() && record["ended"].toInteger() < 253402271999000LL)),
            QStringLiteral("起止时间无效；结束不能早于开始"));
+    if (record.contains("segments")) {
+        ensure(record["segments"].isArray(), QStringLiteral("分段格式无效")); const auto parts = record["segments"].toArray();
+        ensure(parts.size() >= 2 && parts.size() <= 256 && taskPayloadSize(record) <= 512 * 1024, QStringLiteral("任务分段超过上限，请结束后新建任务"));
+        qint64 previousEnd = record["started"].toInteger();
+        for (int i = 0; i < parts.size(); ++i) {
+            ensure(parts[i].isObject(), QStringLiteral("分段必须是对象")); const auto part = parts[i].toObject(); const bool distraction = i % 2 == 1;
+            onlyFields(part, distraction ? QStringList{"kind","started","ended","task","tag"} : QStringList{"kind","started","ended"});
+            ensure(part["kind"] == (distraction ? "distraction" : "focus"), QStringLiteral("分心仅支持一层且必须与专注交替"));
+            auto entry = segmentRecord(record, i); validateRecord(entry, allowRunning && i == parts.size()-1);
+            ensure(entry["started"].toInteger() >= previousEnd && (i != 0 || entry["started"] == record["started"]), QStringLiteral("分段时间重叠或顺序无效"));
+            previousEnd = entry["ended"].toInteger();
+        }
+        ensure(parts.last().toObject()["ended"] == record["ended"], QStringLiteral("任务结束时间与最后区间不一致"));
+    }
 }
 
 Store::Store(const QString &directory)
@@ -196,9 +210,11 @@ void Store::start(const QString &ledgerId, const QString &task, const QString &t
         if (!tag.isEmpty()) record["tag"] = tag;
         save("record", record); });
 }
-void Store::finish(qint64 ended)
+void Store::finish(qint64 ended, const QString &expectedVersion)
 {
     transaction([&] { auto record = active(); ensure(!record.isEmpty(), QStringLiteral("没有进行中的记录"));
+        ensure(expectedVersion.isEmpty() || record["version"].toString() == expectedVersion, QStringLiteral("任务已由其他设备更新，请核对后重试"));
+        if (record.contains("segments")) { auto parts = taskSegments(record); auto last = parts.last().toObject(); last["ended"] = ended; parts[parts.size()-1] = last; record["segments"] = parts; }
         record["ended"] = ended; validateRecord(record); save("record", record); });
 }
 void Store::editRecord(const QString &id, const QString &ledgerId, const QString &task, qint64 started, qint64 ended, const QString &expectedVersion, const QString &tag)
@@ -208,6 +224,7 @@ void Store::editRecord(const QString &id, const QString &ledgerId, const QString
         auto record = id.isEmpty() ? QJsonObject{{"id", identity()}, {"revision", 1}, {"deleted", false}} : find("record", id);
         ensure(!record.isEmpty() && !record["deleted"].toBool() && (id.isEmpty() || record["ledgerId"].toString() == ledgerId), QStringLiteral("记录不存在或不属于此账本"));
         ensure(expectedVersion.isEmpty() || record["version"].toString() == expectedVersion, QStringLiteral("记录已被另一设备更新，请保留输入并重新打开修改"));
+        ensure(!record.contains("segments") || (started == record["started"].toInteger() && ended == record["ended"].toInteger()), QStringLiteral("请在分段明细中修改起止时间"));
         record["ledgerId"] = ledgerId; record["task"] = task.trimmed(); record["started"] = started; record["ended"] = ended;
         // 未传入标签参数的旧调用保留原快照；显式清空才移除标签字段。
         if (!tag.isNull()) {
@@ -227,7 +244,7 @@ QJsonObject Store::backup() const
 {
     idle(); QJsonArray pending;
     for (const auto &value : conflicts()) pending.append(value);
-    return {{"format", "lyushi.backup"}, {"formatVersion", 2}, {"tags", entities("tag", true)}, {"ledgers", entities("ledger", true)},
+    return {{"format", "lyushi.backup"}, {"formatVersion", 3}, {"tags", entities("tag", true)}, {"ledgers", entities("ledger", true)},
         {"records", entities("record", true)}, {"conflicts", pending}};
 }
 QJsonArray Store::conflicts() const
@@ -241,7 +258,7 @@ QJsonArray Store::conflicts() const
  */
 QJsonObject Store::importBackup(const QJsonObject &data)
 {
-    ensure(data["format"].toString() == "lyushi.backup" && (data["formatVersion"].toInt() == 1 || (data["formatVersion"].toInt() == 2 && data["tags"].isArray()))
+    ensure(data["format"].toString() == "lyushi.backup" && (data["formatVersion"].toInt() == 1 || ((data["formatVersion"].toInt() == 2 || data["formatVersion"].toInt() == 3) && data["tags"].isArray()))
            && data["ledgers"].isArray() && data["records"].isArray() && data["conflicts"].isArray(), QStringLiteral("不支持的备份格式"));
     int added = 0, duplicate = 0, conflictCount = 0;
     transaction([&] {
@@ -289,12 +306,16 @@ QString Store::csv(const QString &ledgerId) const
 {
     idle(); auto quote = [](QString text) { if (!text.isEmpty() && QString("=+-@\t\r").contains(text.front())) text.prepend('\''); text.replace("\"", "\"\""); return "\"" + text + "\""; };
     auto date = [](qint64 ms) { return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC).toOffsetFromUtc(28800).toString("yyyy-MM-dd HH:mm:ss.zzz"); };
-    QString result = QString::fromUtf8("\xEF\xBB\xBF") + QStringLiteral("账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号,标签\r\n");
+    QString result = QString::fromUtf8("\xEF\xBB\xBF") + QStringLiteral("账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号,标签,区间序号,区间类型\r\n");
     for (const auto &value : entities("record")) {
         const auto record = value.toObject(); if (!ledgerId.isEmpty() && record["ledgerId"].toString() != ledgerId) continue;
         const auto ledger = find("ledger", record["ledgerId"].toString()); if (ledger["deleted"].toBool()) continue;
-        result += QStringList{quote(ledger["name"].toString()), quote(record["task"].toString()), quote(date(record["started"].toInteger())),
-            quote(date(record["ended"].toInteger())), quote(QString::number((record["ended"].toInteger() - record["started"].toInteger()) / 1000.0, 'f', 3)), quote(record["id"].toString()), quote(record["tag"].toString())}.join(',') + "\r\n";
+        // 专注和分心各占一行，同一任务共用编号；不追加任务汇总行参与求和。
+        const auto parts = taskSegments(record);
+        for (int i=0; i<parts.size(); ++i) { const auto row = segmentRecord(record,i);
+            result += QStringList{quote(ledger["name"].toString()), quote(row["task"].toString()), quote(date(row["started"].toInteger())),
+                quote(date(row["ended"].toInteger())), quote(QString::number((row["ended"].toInteger() - row["started"].toInteger()) / 1000.0, 'f', 3)), quote(record["id"].toString()), quote(row["tag"].toString()), quote(QString::number(i+1)), quote(parts[i].toObject()["kind"] == "focus" ? QStringLiteral("专注") : QStringLiteral("分心"))}.join(',') + "\r\n";
+        }
     }
     return result;
 }

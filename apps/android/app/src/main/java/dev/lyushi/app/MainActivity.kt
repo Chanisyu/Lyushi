@@ -45,6 +45,8 @@ class MainActivity : Activity() {
     private var busy = false
     private var fileMode = 0
     private var actionRecordAtPress: String? = null
+    private var actionVersionAtPress: String? = null
+    private lateinit var focusHint: TextView
     private val refresh = object : Runnable { override fun run() { if (screen == "main") safely { render() }; if (!busy) sync.request(); handler.postDelayed(this, 1000) } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -115,11 +117,11 @@ class MainActivity : Activity() {
         }
         root.addView(ledgerSpinner); locked.add(ledgerSpinner)
         root.addView(button("新建账本") { idle(); promptName("新建账本", "") { selected = store.addLedger(it); showMain() } }.also { locked.add(it) })
-        task = EditText(this).apply { hint = "现在正在做什么？"; maxLines = 4; setText(current?.getString("task") ?: "") }; root.addView(task)
+        task = EditText(this).apply { hint = "现在正在做什么？"; maxLines = 4; setText(current?.let { segmentRecord(it, taskSegments(it).lastIndex).getString("task") } ?: "") }; root.addView(task)
         // 新增及删除入口位于下拉框右侧；管理标签时保留尚未提交的事项输入。
         root.addView(label("标签（可选）", 14f))
         val tagRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        tagSpinner = tagChoice(current?.optString("tag") ?: selectedTag, current != null)
+        tagSpinner = tagChoice(current?.let { segmentRecord(it, taskSegments(it).lastIndex).optString("tag") } ?: selectedTag, current != null)
         tagRow.addView(tagSpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)); locked.add(tagSpinner)
         tagRow.addView(button("删除") {
             idle(); val name = chosenTag(tagSpinner); check(name.isNotEmpty()) { "请先选择标签" }
@@ -136,21 +138,51 @@ class MainActivity : Activity() {
         action = button("开始记录") {
             check(!busy) { "正在处理文件" }; val current = store.active()?.getString("id") ?: ""
             val intended = actionRecordAtPress ?: current; actionRecordAtPress = null
+            val version = actionVersionAtPress ?: store.active()?.optString("version"); actionVersionAtPress = null
+            check(version == store.active()?.optString("version")) { "计时状态已由其他设备改变，请核对后重试" }
             check(intended == current) { "计时状态已由其他设备改变，请核对页面后再操作" }
-            if (store.active() == null) store.start(selected, task.text.toString(), chosenTag(tagSpinner)) else { store.finish(); task.setText("") }; showMain(); sync.request(true)
+            if (store.active() == null) store.start(selected, task.text.toString(), chosenTag(tagSpinner)) else if (isDistracted(store.active())) store.resumeFocus(System.currentTimeMillis(), version!!) else { store.finish(expectedVersion = version); task.setText("") }; showMain(); sync.request(true)
         }
         // 返回 false，让系统保留正常点击与无障碍行为；这里只捕获用户按下时的操作对象。
         action.setOnTouchListener { _, event ->
-            if (event.action == android.view.MotionEvent.ACTION_DOWN) actionRecordAtPress = store.active()?.getString("id") ?: ""
-            else if (event.action == android.view.MotionEvent.ACTION_CANCEL) actionRecordAtPress = null
+            if (event.action == android.view.MotionEvent.ACTION_DOWN) { actionRecordAtPress = store.active()?.getString("id") ?: ""; actionVersionAtPress = store.active()?.optString("version") }
+            else if (event.action == android.view.MotionEvent.ACTION_CANCEL) { actionRecordAtPress = null; actionVersionAtPress = null }
             false
         }; root.addView(action)
+        focusHint = label("", 14f); root.addView(focusHint)
+        val distracted = isDistracted(current)
+        if (current != null && !distracted) root.addView(button("分心一下") { startDistraction() })
+        if (distracted) root.addView(button("结束全部") {
+            val version = store.active()!!.getString("version")
+            AlertDialog.Builder(this).setTitle("结束全部").setMessage("结束分心和本次任务？已记录的全部时间区间将保留。")
+                .setNegativeButton("取消",null).setPositiveButton("结束") { _, _ -> safely { store.finish(expectedVersion = version); showMain(); sync.request(true) } }.create().present()
+        })
         root.addView(button("账本明细与管理") { idle(); check(selected.isNotEmpty()) { "请先新建账本" }; showDetails() }.also { locked.add(it) })
         root.addView(button("从 JSON 备份恢复") { chooseFile(0) }.also { locked.add(it) })
         root.addView(button("设置") { check(!busy); showSettings() })
         root.addView(button("立即同步") { sync.request(true) })
         root.addView(button("查看保留的冲突版本") { showConflicts() }.also { locked.add(it) })
         status = label("", 13f); root.addView(status); render()
+    }
+    /** 表单确认时才切换状态；取消不改变原任务，远端版本变化会阻止提交。 */
+    private fun startDistraction() {
+        val current = checkNotNull(store.active()); check(!isDistracted(current)) { "请先返回原任务" }
+        val fields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24,0,24,0) }
+        val name = EditText(this).apply { hint = "分心事项，留空记为分心" }; fields.addView(name)
+        fields.addView(label("标签")); val choice = tagChoice(""); fields.addView(choice)
+        val dialog = AlertDialog.Builder(this).setTitle("分心一下").setView(fields).setPositiveButton("开始分心",null).setNegativeButton("取消",null).create()
+        dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { safely {
+            check(!busy); store.distract(name.text.toString(), chosenTag(choice), System.currentTimeMillis(), current.getString("version")); dialog.dismiss(); showMain(); sync.request(true)
+        } } }; dialog.present()
+    }
+    /** 主任务汇总独立于时间区间列表，修改后重新读取聚合版本，避免覆盖另一设备的新数据。 */
+    private fun showSegments(record: JSONObject) {
+        idle(); screen = "segments"; page("分段明细 · ${record.getString("task")}")
+        taskSegments(record).forEachIndexed { index, segment ->
+            val item = segmentRecord(record,index); val kind = if (segment.getString("kind") == "focus") "专注" else "分心"
+            root.addView(button("$kind · ${item.getString("task")}\n${dateText(item.getLong("started"))} → ${dateText(item.getLong("ended"))}\n${durationText(item.getLong("ended")-item.getLong("started"))} · ${item.optString("tag", "无标签")}") { edit(record,index) })
+        }
+        root.addView(button("返回账本明细") { showDetails() })
     }
     /** 下拉项与显示文字分离，已删除快照不会被误认为可供新任务使用的标签。 */
     private fun tagChoice(initial: String, keepHistorical: Boolean = false): Spinner {
@@ -176,10 +208,12 @@ class MainActivity : Activity() {
         val now = System.currentTimeMillis(); clock.text = dateText(now) + " · 北京时间"
         val current = store.active(); val running = current != null
         locked.forEach { it.isEnabled = !running && !busy }; task.isEnabled = !running && !busy
-        action.isEnabled = !busy && (running || selected.isNotEmpty()); action.text = if (running) "结束记录" else "开始记录"
-        if (current != null && task.text.toString() != current.getString("task")) task.setText(current.getString("task"))
-        elapsed.text = if (current == null) "00:00:00" else durationText(now - current.getLong("started"))
-        status.text = if (busy) "正在处理文件…" else if (current != null && now < current.getLong("started")) "设备时间早于开始时间，请核对系统时间"
+        action.isEnabled = !busy && (running || selected.isNotEmpty()); action.text = if (isDistracted(current)) "结束分心并继续" else if (running) "结束记录" else "开始记录"
+        val display = current?.let { segmentRecord(it, taskSegments(it).lastIndex) }
+        if (display != null && task.text.toString() != display.getString("task")) task.setText(display.getString("task"))
+        focusHint.text = if (isDistracted(current)) "分心中 · 待恢复：${current!!.getString("task")}" else if (running) "原任务累计有效时长" else ""
+        elapsed.text = if (current == null) "00:00:00" else durationText(if (isDistracted(current)) now - display!!.getLong("started") else focusDuration(current, now))
+        status.text = if (busy) "正在处理文件…" else if (current != null && now < display!!.getLong("started")) "设备时间早于开始时间，请核对系统时间"
             else sync.status + if (store.hasConflicts()) " · 已保留冲突版本" else ""
     }
     /** 账本名输入框不会预先执行更改，取消或空白校验失败均保留原数据。 */
@@ -195,9 +229,9 @@ class MainActivity : Activity() {
         root.addView(button("补记") { idle(); edit(null) })
         val records = store.entities("record").filter { it.getString("ledgerId") == selected }.sortedByDescending { it.getLong("started") }
         if (records.isEmpty()) root.addView(label("这个账本还没有记录。"))
-        records.forEach { record -> root.addView(button(record.getString("task") + "\n" + dateText(record.getLong("started")) + " → " + dateText(record.getLong("ended")) + "\n" + durationText(record.getLong("ended") - record.getLong("started")) + "\n标签：" + record.optString("tag", "无标签")) {
-            idle(); AlertDialog.Builder(this).setTitle(record.getString("task")).setItems(arrayOf("修改", "删除")) { _, which -> safely {
-                if (which == 0) edit(record) else AlertDialog.Builder(this).setTitle("删除记录").setMessage("确认删除这条记录？")
+        records.forEach { record -> root.addView(button(record.getString("task") + "\n" + dateText(record.getLong("started")) + " → " + dateText(record.getLong("ended")) + "\n" + durationText(focusDuration(record, record.getLong("ended"))) + "（有效时长）\n标签：" + record.optString("tag", "无标签")) {
+            idle(); AlertDialog.Builder(this).setTitle(record.getString("task")).setItems(arrayOf("修改事项与标签", "查看分段", "删除任务")) { _, which -> safely {
+                if (which == 0) edit(record) else if (which == 1) showSegments(record) else AlertDialog.Builder(this).setTitle("删除记录").setMessage("确认删除整个任务及全部专注、分心区间？")
                     .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> safely { idle(); store.deleteRecord(record.getString("id")); showDetails() } }.create().present()
             } }.create().present()
         }) }
@@ -210,18 +244,21 @@ class MainActivity : Activity() {
         root.addView(button("导入 JSON") { chooseFile(0) }); root.addView(button("查看已保留的导入冲突") { showConflicts() }); root.addView(button("返回") { showMain() })
     }
     /** 表单保留精确输入渠道，严格解析日期，避免把不存在的日期自动修正。 */
-    private fun edit(record: JSONObject?) {
+    private fun edit(record: JSONObject?, segment: Int = -1) {
         idle(); val fields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 0, 24, 0) }
-        val taskInput = EditText(this).apply { hint = "事项"; setText(record?.getString("task") ?: "") }; fields.addView(taskInput)
-        fields.addView(label("标签", 14f)); val recordTag = tagChoice(record?.optString("tag") ?: "", true); fields.addView(recordTag)
-        fun timeInput(title: String, value: Long): EditText { fields.addView(label(title, 14f)); return EditText(this).apply { setSingleLine(true); setText(dateText(value)); fields.addView(this) } }
-        val begin = timeInput("开始（北京时间）", record?.getLong("started") ?: (System.currentTimeMillis() - 60000))
-        val end = timeInput("结束（北京时间）", record?.getLong("ended") ?: System.currentTimeMillis())
+        val display = if (record == null || segment < 0) record else segmentRecord(record,segment)
+        val taskInput = EditText(this).apply { hint = "事项"; setText(display?.getString("task") ?: "") }; fields.addView(taskInput)
+        fields.addView(label("标签", 14f)); val recordTag = tagChoice(display?.optString("tag") ?: "", true); fields.addView(recordTag)
+        fun timeInput(title: String, value: Long): EditText { fields.addView(label(title, 14f)); return EditText(this).apply { setSingleLine(true); setText(dateText(value, true)); fields.addView(this) } }
+        val begin = timeInput("开始（北京时间）", display?.getLong("started") ?: (System.currentTimeMillis() - 60000))
+        val end = timeInput("结束（北京时间）", display?.getLong("ended") ?: System.currentTimeMillis())
+        if (segment < 0 && record?.has("segments") == true) { begin.isEnabled = false; end.isEnabled = false; fields.addView(label("起止时间请在分段明细修改；事项与标签应用到全部专注区间。",14f)) }
         val dialog = AlertDialog.Builder(this).setTitle(if (record == null) "补记" else "修改记录").setView(fields).setPositiveButton("保存", null).setNegativeButton("取消", null).create()
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { safely {
-            idle(); val format = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss").withResolverStyle(ResolverStyle.STRICT)
+            idle(); val format = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSS").withResolverStyle(ResolverStyle.STRICT)
             fun parse(input: EditText) = LocalDateTime.parse(input.text.toString(), format).toInstant(ZoneOffset.ofHours(8)).toEpochMilli()
-            store.edit(record?.getString("id"), selected, taskInput.text.toString(), parse(begin), parse(end), record?.optString("version"), chosenTag(recordTag)); dialog.dismiss(); showDetails()
+            if (segment >= 0) store.editSegment(record!!.getString("id"), segment, taskInput.text.toString(), chosenTag(recordTag), parse(begin), parse(end), record.getString("version"))
+            else store.edit(record?.getString("id"), selected, taskInput.text.toString(), parse(begin), parse(end), record?.optString("version"), chosenTag(recordTag)); dialog.dismiss(); if (segment >= 0) showSegments(store.find("record", record!!.getString("id"))!!) else showDetails()
         } } }; dialog.present()
     }
     /** 冲突只读展示双方保留策略；完整导入版本也会随 JSON 备份导出。 */
@@ -238,7 +275,10 @@ class MainActivity : Activity() {
                 else { append(entity.getString("task")); append("\n标签：${entity.optString("tag", "无标签")}"); append("\n账本：${names[entity.getString("ledgerId")] ?: "已删除或未知账本"}")
                     append("\n开始：${dateText(entity.getLong("started"))}"); append(if (entity.isNull("ended")) "\n结束：此版本尚未结束（存档）" else "\n结束：${dateText(entity.getLong("ended"))}") }
             }
-            root.addView(label(description, 16f).apply { setTextIsSelectable(true) })
+            val segments = if (!entity.has("segments")) "" else taskSegments(entity).mapIndexed { i, part ->
+                val row = segmentRecord(entity,i)
+                "\n${if (part.getString("kind") == "focus") "专注" else "分心"} · ${row.getString("task")} · ${dateText(row.getLong("started"))} → ${if (row.isNull("ended")) "尚未结束（存档）" else dateText(row.getLong("ended"))} · 标签：${row.optString("tag", "无标签")}" }.joinToString("")
+            root.addView(label(description + segments, 16f).apply { setTextIsSelectable(true) })
         }
         root.addView(button("返回") { showMain() })
     }

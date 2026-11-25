@@ -8,7 +8,7 @@ test -f "$stage_dir/lyushi-server"
 test -f "$stage_dir/lyushi.service"
 test -x /opt/lyushi/lyushi-server
 test -f /var/lib/lyushi/sync.sqlite
-stamp="tags-0.4.0-$(date -u +%Y%m%dT%H%M%S)-$$"
+stamp="focus-0.5.0-$(date -u +%Y%m%dT%H%M%S)-$$"
 binary_backup="/opt/lyushi/lyushi-server.$stamp.previous"
 unit_backup="/opt/lyushi/lyushi.$stamp.service.previous"
 database_backup="/var/lib/lyushi/backups/$stamp.sqlite"
@@ -58,8 +58,8 @@ for device_id, digest, revoked in backup.execute('SELECT id,token_hash,revoked F
     assert current.execute('SELECT token_hash,revoked FROM devices WHERE id=?', (device_id,)).fetchone() == (digest, revoked)
 with urlopen('http://127.0.0.1:8093/health', timeout=10) as response:
     health = json.load(response)
-assert health['protocol'] == 2 and health['minimumClient'] == '0.4.0'
-print(json.dumps({'passed': True, 'protocol': 2, 'databaseIntegrity': True,
+assert health['protocol'] == 3 and health['minimumClient'] == '0.5.0'
+print(json.dumps({'passed': True, 'protocol': 3, 'databaseIntegrity': True,
                   'serverIdentityPreserved': True, 'immutableHistoryPreserved': True,
                   'deviceKeysPreserved': True}))
 PY

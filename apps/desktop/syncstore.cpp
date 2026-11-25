@@ -97,7 +97,7 @@ bool Store::acceptSync(const QJsonObject &response, const QJsonArray &sent)
                     content["archived"] = true;
                     query.prepare("INSERT OR IGNORE INTO conflicts(id,kind,entity_id,payload) VALUES(?,?,?,?)"); query.addBindValue(id); query.addBindValue(originalKind); query.addBindValue(original["id"].toString()); query.addBindValue(QJsonDocument(content).toJson(QJsonDocument::Compact)); run(query);
                 }
-                else if (kind == "record") { auto completed = entity; if (completed["ended"].isNull()) completed["ended"] = completed["started"]; validateRecord(completed); }
+                else if (kind == "record") { validateRecord(entity, true); }
                 else validateLedger(entity);
                 query.prepare("INSERT INTO sync_heads(kind,id,version,payload) VALUES(?,?,?,?)"); query.addBindValue(kind); query.addBindValue(id); query.addBindValue(entity["version"].toString()); query.addBindValue(QJsonDocument(entity).toJson(QJsonDocument::Compact)); run(query);
                 if (heads.size() > 1 && kind != "archive") preserveRemote(kind, entity);
