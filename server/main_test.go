@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +17,7 @@ func testService(t *testing.T) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.db.Close() })
+	t.Cleanup(func() { s.close() })
 	return s
 }
 func ledgerOp(id, parent, name string) Operation {
@@ -168,14 +166,13 @@ func TestPaginationAndAuthentication(t *testing.T) {
 	if len(next.Changes) != 10 || next.More {
 		t.Fatal("pagination continuation failed")
 	}
-	key := randomID()
-	hash := sha256.Sum256([]byte(key))
-	s.db.Exec("INSERT INTO devices(id,label,token_hash) VALUES('test','test',?)", hex.EncodeToString(hash[:]))
+	_, key := testAccountDevice(t, s, "member", "user")
 	body, _ := json.Marshal(Request{Operations: []Operation{}})
 	serve := func(token string) int {
 		r := httptest.NewRequest(http.MethodPost, "/v1/sync", bytes.NewReader(body))
 		r.Header.Set("Authorization", "Bearer "+token)
-		r.Header.Set("X-Lyushi-Protocol", "3")
+		r.Header.Set("X-Lyushi-Protocol", "4")
+		r.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		s.handler().ServeHTTP(w, r)
 		return w.Code

@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
 #ifdef Q_OS_WIN
@@ -16,10 +17,11 @@
  */
 class Vault {
 public:
-    static QString read()
+    static QString read(const QString &profile = {})
     {
+        ensure(profile.isEmpty() || profile=="local" || QRegularExpression("^[0-9a-f]{64}$").match(profile).hasMatch(),QStringLiteral("账户密钥空间无效"));
 #ifdef Q_OS_WIN
-        QFile file(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/device-key.bin");
+        QFile file(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + (profile.isEmpty() ? "/device-key.bin" : "/profile-keys/"+profile+".bin"));
         if (!file.exists()) return {};
         ensure(file.open(QIODevice::ReadOnly) && file.size() <= 65536, QStringLiteral("无法读取密钥密文"));
         auto encrypted = file.readAll(); DATA_BLOB input{DWORD(encrypted.size()), reinterpret_cast<BYTE *>(encrypted.data())}, output{};
@@ -27,7 +29,7 @@ public:
         const auto result = QString::fromUtf8(reinterpret_cast<char *>(output.pbData), output.cbData);
         SecureZeroMemory(output.pbData, output.cbData); LocalFree(output.pbData); return result;
 #else
-        QProcess process; process.start("secret-tool", {"lookup", "service", "dev.lyushi.app"});
+        QProcess process; QStringList arguments{"lookup","service","dev.lyushi.app"}; if (!profile.isEmpty()) arguments << "account" << profile; process.start("secret-tool",arguments);
         ensure(process.waitForStarted(3000), QStringLiteral("需要安装 libsecret-tools 并启用系统密钥环"));
         if (!process.waitForFinished(10000)) { process.kill(); process.waitForFinished(); ensure(false, QStringLiteral("系统密钥环未响应")); }
         const auto errors = process.readAllStandardError();
@@ -35,11 +37,12 @@ public:
         return QString::fromUtf8(process.readAllStandardOutput()).trimmed();
 #endif
     }
-    static void write(const QString &key)
+    static void write(const QString &key, const QString &profile = {})
     {
+        ensure(profile.isEmpty() || profile=="local" || QRegularExpression("^[0-9a-f]{64}$").match(profile).hasMatch(),QStringLiteral("账户密钥空间无效"));
 #ifdef Q_OS_WIN
-        const auto directory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-        ensure(QDir().mkpath(directory), QStringLiteral("无法创建密钥目录")); const auto path = directory + "/device-key.bin";
+        const auto directory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + (profile.isEmpty() ? "" : "/profile-keys");
+        ensure(QDir().mkpath(directory), QStringLiteral("无法创建密钥目录")); const auto path = directory + (profile.isEmpty() ? "/device-key.bin" : "/"+profile+".bin");
         if (key.isEmpty()) { if (QFile::exists(path)) ensure(QFile::remove(path), QStringLiteral("清除密钥失败")); return; }
         auto bytes = key.toUtf8(); DATA_BLOB input{DWORD(bytes.size()), reinterpret_cast<BYTE *>(bytes.data())}, output{};
         ensure(CryptProtectData(&input, L"Lyushi device key", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &output), QStringLiteral("系统无法加密设备密钥"));
@@ -48,13 +51,13 @@ public:
         ensure(file.write(encrypted) == encrypted.size() && file.commit(), QStringLiteral("保存密钥密文失败"));
 #else
         QProcess process;
-        process.start("secret-tool", key.isEmpty() ? QStringList{"clear", "service", "dev.lyushi.app"} : QStringList{"store", "--label=柳时设备密钥", "service", "dev.lyushi.app"});
+        QStringList arguments=key.isEmpty() ? QStringList{"clear","service","dev.lyushi.app"} : QStringList{"store","--label=柳时设备密钥","service","dev.lyushi.app"}; if (!profile.isEmpty()) arguments << "account" << profile; process.start("secret-tool",arguments);
         ensure(process.waitForStarted(3000), QStringLiteral("需要安装 libsecret-tools 并启用系统密钥环"));
         if (!key.isEmpty()) process.write(key.toUtf8()); process.closeWriteChannel();
         if (!process.waitForFinished(15000)) { process.kill(); process.waitForFinished(); ensure(false, QStringLiteral("系统密钥环未响应")); }
         ensure(process.exitStatus() == QProcess::NormalExit && process.readAllStandardError().isEmpty()
             && (process.exitCode() == 0 || (key.isEmpty() && process.exitCode() == 1)), QStringLiteral("系统密钥环保存失败，请先解锁"));
 #endif
-        ensure(read() == key, QStringLiteral("密钥保存后校验失败"));
+        ensure(read(profile) == key, QStringLiteral("密钥保存后校验失败"));
     }
 };

@@ -1,18 +1,16 @@
-// 柳时同步服务：单用户、多设备，使用不可变操作和版本分支保留并发内容。
+// 柳时同步服务：多用户、独立设备认证，使用不可变操作和版本分支保留并发内容。
 // 仅由现有 HTTPS 反向代理对外提供服务，不记录请求正文或设备密钥。
 package main
 
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -53,8 +51,9 @@ type Response struct {
 	More     bool     `json:"more"`
 }
 type Service struct {
-	db *sql.DB
-	id string
+	db      *sql.DB
+	id      string
+	catalog *Catalog
 }
 
 // 随机编号不包含设备名或用户内容，密钥使用 256 位随机数。
@@ -78,7 +77,7 @@ func openService(path string) (*Service, error) {
 	db.SetMaxOpenConns(1)
 	fail := func(err error) (*Service, error) { db.Close(); return nil, err }
 	for _, statement := range []string{
-		"PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA busy_timeout=5000",
+		"PRAGMA secure_delete=ON", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA busy_timeout=5000",
 		"CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)",
 		"CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,label TEXT NOT NULL,token_hash TEXT UNIQUE NOT NULL,revoked INTEGER NOT NULL DEFAULT 0)",
 		"CREATE TABLE IF NOT EXISTS versions(id TEXT PRIMARY KEY,kind TEXT NOT NULL,entity_id TEXT NOT NULL,operation TEXT NOT NULL,device TEXT NOT NULL)",
@@ -97,6 +96,9 @@ func openService(path string) (*Service, error) {
 		return fail(err)
 	}
 	if err := os.Chmod(path, 0600); err != nil {
+		return fail(err)
+	}
+	if err := service.initCatalog(path); err != nil {
 		return fail(err)
 	}
 	return service, nil
@@ -262,8 +264,13 @@ func businessContent(entity map[string]any) string {
 
 // 批次全有或全无。重复上传读出原操作核对；分支只替换其明确声明的父版本。
 func (s *Service) sync(ctx context.Context, device string, request Request) (Response, error) {
+	return s.syncBatch(ctx, device, request, false)
+}
+
+// 网页整本删除及导入经过同一校验和事务，仅放宽本机调用的条目数上限。
+func (s *Service) syncBatch(ctx context.Context, device string, request Request, internal bool) (Response, error) {
 	result := Response{ServerID: s.id, Cursor: request.Cursor, Ack: []string{}, Changes: []Change{}}
-	if request.Cursor < 0 || len(request.Operations) > 50 || (request.ServerID != "" && request.ServerID != s.id) || (request.ServerID == "" && request.Cursor != 0) {
+	if request.Cursor < 0 || (len(request.Operations) > 50 && !internal) || len(request.Operations) > 50000 || (request.ServerID != "" && request.ServerID != s.id) || (request.ServerID == "" && request.Cursor != 0) {
 		return result, errors.New("server_identity_or_cursor")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -392,61 +399,7 @@ func (s *Service) sync(ctx context.Context, device string, request Request) (Res
 }
 
 // 公网只接受设备密钥。错误响应不回显数据库路径、请求内容或任何认证信息。
-func (s *Service) handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"status":"ok","protocol":3,"minimumClient":"0.5.0"}`)
-	})
-	slots := make(chan struct{}, 8)
-	mux.HandleFunc("POST /v1/sync", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		select {
-		case slots <- struct{}{}:
-			defer func() { <-slots }()
-		default:
-			http.Error(w, `{"error":"busy"}`, 503)
-			return
-		}
-		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if len(key) != 64 || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
-			http.Error(w, `{"error":"unauthorized"}`, 401)
-			return
-		}
-		hash := sha256.Sum256([]byte(key))
-		var device string
-		if err := s.db.QueryRowContext(r.Context(), "SELECT id FROM devices WHERE token_hash=? AND revoked=0", hex.EncodeToString(hash[:])).Scan(&device); err != nil {
-			http.Error(w, `{"error":"unauthorized"}`, 401)
-			return
-		}
-		// 旧客户端不能识别完整任务分段；在写入事务前拒绝以避免元数据丢失。
-		if r.Header.Get("X-Lyushi-Protocol") != "3" {
-			http.Error(w, `{"error":"client_upgrade_required","minimumClient":"0.5.0"}`, http.StatusUpgradeRequired)
-			return
-		}
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))
-		decoder.UseNumber()
-		decoder.DisallowUnknownFields()
-		var request Request
-		if err := decoder.Decode(&request); err != nil {
-			http.Error(w, `{"error":"invalid_request"}`, 400)
-			return
-		}
-		var extra any
-		if decoder.Decode(&extra) != io.EOF {
-			http.Error(w, `{"error":"invalid_request"}`, 400)
-			return
-		}
-		response, err := s.sync(r.Context(), device, request)
-		if err != nil {
-			http.Error(w, `{"error":"sync_rejected"}`, 409)
-			return
-		}
-		json.NewEncoder(w).Encode(response)
-	})
-	return mux
-}
+func (s *Service) handler() http.Handler { return s.accountHandler() }
 
 // 管理命令仅在服务器本机运行，密钥写入权限受限的文件，不输出到日志或进程参数。
 func main() {
@@ -459,6 +412,13 @@ func run() int {
 	create := flags.String("create-device", "", "创建具名设备")
 	keyFile := flags.String("key-file", "", "新设备密钥输出文件，必须尚不存在")
 	revoke := flags.String("revoke-device", "", "撤销设备编号")
+	initAdmin := flags.Bool("init-admin", false, "初始化唯一管理员")
+	resetAdmin := flags.Bool("reset-admin-password", false, "重置管理员临时密码")
+	clearPersonal := flags.Bool("reset-personal-data", false, "清空旧单用户数据，必须与初始化管理员共同使用")
+	userName := flags.String("user", "admin", "设备所属用户名")
+	createUser := flags.String("create-user", "", "创建普通用户")
+	displayName := flags.String("display-name", "", "账户显示名称")
+	passwordFile := flags.String("password-file", "", "临时密码输出文件，必须尚不存在")
 	backup := flags.String("backup", "", "在线一致性备份输出文件，必须尚不存在")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return 2
@@ -468,36 +428,67 @@ func run() int {
 		log.Print("无法打开同步数据库")
 		return 1
 	}
-	defer service.db.Close()
-	if *create != "" {
-		if *keyFile == "" {
-			log.Print("需要指定密钥输出文件")
+	defer service.close()
+	if *initAdmin || *resetAdmin || *createUser != "" {
+		if *clearPersonal && !*initAdmin {
+			log.Print("清空旧数据必须与初始化管理员共同执行")
 			return 2
 		}
-		file, err := os.OpenFile(*keyFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		password := randomID()[:24]
+		if err := secretFile(*passwordFile, password); err != nil {
+			log.Print("无法创建临时密码文件")
+			return 1
+		}
+		var err error
+		if *initAdmin {
+			if *clearPersonal {
+				err = service.clearLegacy()
+			}
+			if err == nil {
+				_, err = service.createUser("admin", "管理员", "admin", password)
+			}
+		} else if *resetAdmin {
+			var u User
+			u, err = service.userByName("admin")
+			if err == nil {
+				err = service.setPassword(u.ID, password, true)
+			}
+		} else {
+			name := *displayName
+			if name == "" {
+				name = *createUser
+			}
+			_, err = service.createUser(*createUser, name, "user", password)
+		}
 		if err != nil {
-			log.Print("无法创建密钥文件")
+			os.Remove(*passwordFile)
+			log.Print(catalogError(err))
 			return 1
 		}
-		key, id := randomID(), randomID()
-		hash := sha256.Sum256([]byte(key))
-		if _, err = file.WriteString(key); err == nil {
-			err = file.Sync()
-		}
-		closeErr := file.Close()
-		if err == nil {
-			err = closeErr
-		}
+		log.Print("账户已创建或更新，临时密码已写入指定文件")
+		return 0
+	}
+	if *clearPersonal {
+		log.Print("拒绝单独清空旧数据")
+		return 2
+	}
+	if *create != "" {
+		u, err := service.userByName(*userName)
 		if err != nil {
-			os.Remove(*keyFile)
+			log.Print("请先初始化所属用户")
 			return 1
 		}
-		if _, err = service.db.Exec("INSERT INTO devices(id,label,token_hash) VALUES(?,?,?)", id, *create, hex.EncodeToString(hash[:])); err != nil {
-			os.Remove(*keyFile)
-			log.Print("创建设备失败")
+		device, err := service.createDevice(u.ID, *create)
+		if err != nil {
+			log.Print(catalogError(err))
 			return 1
 		}
-		fmt.Println(id)
+		if err = secretFile(*keyFile, device["key"].(string)); err != nil {
+			service.db.Exec("DELETE FROM devices WHERE id=?", device["id"])
+			log.Print("无法写入密钥文件")
+			return 1
+		}
+		fmt.Println(device["id"])
 		return 0
 	}
 	if *revoke != "" {
@@ -512,14 +503,10 @@ func run() int {
 		return 0
 	}
 	if *backup != "" {
-		if _, err := os.Stat(*backup); !os.IsNotExist(err) {
+		if err := service.backupCatalog(*backup); err != nil {
+			log.Print("完整备份失败：", err)
 			return 1
 		}
-		if _, err := service.db.Exec("VACUUM INTO ?", *backup); err != nil {
-			log.Print("数据库备份失败")
-			return 1
-		}
-		os.Chmod(*backup, 0600)
 		return 0
 	}
 	if !strings.HasPrefix(*listen, "127.0.0.1:") {
@@ -527,6 +514,7 @@ func run() int {
 		return 2
 	}
 	server := &http.Server{Addr: *listen, Handler: service.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	shutdownDone := make(chan struct{})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -534,11 +522,15 @@ func run() int {
 		deadline, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		server.Shutdown(deadline)
+		close(shutdownDone)
 	}()
 	log.Print("柳时同步服务启动")
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Print("同步监听失败")
 		return 1
+	}
+	if ctx.Err() != nil {
+		<-shutdownDone
 	}
 	return 0
 }

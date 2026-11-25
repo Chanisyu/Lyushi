@@ -1,7 +1,7 @@
-# 正式服务使用独立低权限用户；0.4.0 标签同步要求客户端声明协议能力 2。
+# 多用户服务使用独立低权限用户；0.6.0 要求客户端声明协议能力 4。
 # 公网访问由 Caddy 提供，服务地址及数据目录保持兼容，无需重建数据库。
 [Unit]
-Description=Lyushi personal time sync
+Description=Lyushi multi-user time sync and console
 After=network.target
 
 [Service]

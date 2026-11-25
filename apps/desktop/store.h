@@ -3,6 +3,8 @@
 #include <QJsonObject>
 #include <QSqlDatabase>
 #include <functional>
+#include <memory>
+#include <QLockFile>
 
 /**
  * 本地数据边界：账本、记录和待上传操作存入独立的正式应用数据库。
@@ -11,6 +13,8 @@
  */
 class Store {
     QSqlDatabase db;
+    std::unique_ptr<QLockFile> profileLock;
+    void openDirectory(const QString &directory);
     void transaction(const std::function<void()> &action);
     void save(const QString &kind, QJsonObject entity);
     QJsonObject find(const QString &kind, const QString &id) const;
@@ -20,6 +24,11 @@ class Store {
 public:
     explicit Store(const QString &directory);
     ~Store();
+    /** 仅在当前账户空闲时切换数据库；目标库的活动任务保留原状。 */
+    void useDirectory(const QString &directory);
+    QString directory() const;
+    /** 上传前绑定经过设备认证的用户及服务器身份，拒绝跨账户复用本地队列。 */
+    void bindAccount(const QString &userId, const QString &serverId);
     QJsonArray entities(const QString &kind, bool includeDeleted = false) const;
     QJsonObject active() const;
     QString addLedger(const QString &name);

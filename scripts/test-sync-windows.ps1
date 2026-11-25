@@ -15,6 +15,8 @@ $client = Join-Path $projectDirectory 'build/desktop-windows/lyushi.exe'
 $server = Join-Path $projectDirectory 'build/lyushi-server.exe'
 $database = Join-Path $sandbox 'server.sqlite'
 $keyFile = Join-Path $sandbox 'test-device.key'
+& $server --db $database --init-admin --password-file (Join-Path $sandbox 'admin-initial.txt') | Out-Null
+if ($LASTEXITCODE -ne 0) { throw '初始化隔离管理员失败' }
 & $server --db $database --create-device test-device --key-file $keyFile | Out-Null
 if ($LASTEXITCODE -ne 0) { throw '创建隔离设备失败' }
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,0)
@@ -88,7 +90,7 @@ try {
             $operations+=@{id=$version;kind='record';entityId=$base.id;parents=@($parent);entity=$entity}; $parent=$version
         }
         $body=@{serverId=$serverId;cursor=$cursor;operations=$operations}|ConvertTo-Json -Depth 9 -Compress
-        $reply=Invoke-RestMethod "$address/v1/sync" -Method Post -Headers @{Authorization="Bearer $token";"X-Lyushi-Protocol"="3"} -ContentType application/json -Body $body
+        $reply=Invoke-RestMethod "$address/v1/sync" -Method Post -Headers @{Authorization="Bearer $token";"X-Lyushi-Protocol"="4"} -ContentType application/json -Body $body
         $serverId=$reply.serverId; $cursor=$reply.cursor
     }
     Apply-Edit $one $base 'pending-across-pages'

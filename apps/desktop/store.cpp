@@ -2,6 +2,8 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QFileInfo>
+#include <QMap>
 #include <QJsonDocument>
 #include <QSet>
 #include <QSqlError>
@@ -72,9 +74,14 @@ void validateRecord(const QJsonObject &record, bool allowRunning)
     }
 }
 
-Store::Store(const QString &directory)
+Store::Store(const QString &directory) { openDirectory(directory); }
+/** 连接重建集中在同一入口，原目录和新目录分别保留其队列、游标与冲突。 */
+void Store::openDirectory(const QString &directory)
 {
     ensure(QDir().mkpath(directory), QStringLiteral("无法创建数据目录"));
+    const auto lockPath=QDir(QFileInfo(directory).absoluteFilePath()).filePath("store.lock");std::unique_ptr<QLockFile> nextLock;
+    if(!profileLock || profileLock->fileName()!=lockPath){ nextLock=std::make_unique<QLockFile>(lockPath);ensure(nextLock->tryLock(0),QStringLiteral("此账户数据空间已由另一个进程打开")); }
+    if(db.isValid()){const auto name=db.connectionName();db.close();db={};QSqlDatabase::removeDatabase(name);}
     db = QSqlDatabase::addDatabase("QSQLITE", identity());
     db.setDatabaseName(QDir(directory).filePath("lyushi.sqlite"));
     ensure(db.open(), db.lastError().text());
@@ -105,6 +112,7 @@ Store::Store(const QString &directory)
         for (const auto &content : conflicts()) queueArchive(content.toObject());
         ensure(migration.exec("INSERT INTO sync_meta(key,value) VALUES('protocol','1')"), migration.lastError().text());
     });
+    if(nextLock) profileLock=std::move(nextLock);
 }
 /** 先关闭句柄再移除命名连接，避免同进程自检反复打开时遗留连接。 */
 Store::~Store() { const auto name = db.connectionName(); db.close(); db = {}; QSqlDatabase::removeDatabase(name); }
@@ -318,4 +326,22 @@ QString Store::csv(const QString &ledgerId) const
         }
     }
     return result;
+}
+
+/** 切换失败重新打开原库，不把不完整目标误显示为原账户。 */
+void Store::useDirectory(const QString &directory)
+{
+    idle(); const auto previous=this->directory(); if(QFileInfo(directory).absoluteFilePath()==previous) return;
+    try { openDirectory(directory); } catch (...) { openDirectory(previous); throw; }
+}
+QString Store::directory() const { return QFileInfo(db.databaseName()).absolutePath(); }
+void Store::bindAccount(const QString &userId, const QString &serverId)
+{
+    ensure(userId.size()==64 && serverId.size()==64, QStringLiteral("账户身份无效"));
+    transaction([&] { QSqlQuery query(db); query.prepare("SELECT key,value FROM sync_meta WHERE key IN ('accountId','boundServerId','serverId')"); execute(query); QMap<QString,QString> meta;
+        while (query.next()) meta[query.value(0).toString()]=query.value(1).toString(); query.finish();
+        ensure(meta.value("accountId").isEmpty() || meta["accountId"]==userId,QStringLiteral("设备密钥属于其他账户，请在账户设置中连接并切换"));
+        ensure((meta.value("serverId").isEmpty() || meta["serverId"]==serverId) && (meta.value("boundServerId").isEmpty() || meta["boundServerId"]==serverId),QStringLiteral("服务器身份变化，请核对账户或重新连接独立数据空间"));
+        for (const auto &entry : {qMakePair(QString("accountId"),userId),qMakePair(QString("boundServerId"),serverId)}) { query.prepare("INSERT OR REPLACE INTO sync_meta(key,value) VALUES(?,?)");query.addBindValue(entry.first);query.addBindValue(entry.second);execute(query); }
+    });
 }

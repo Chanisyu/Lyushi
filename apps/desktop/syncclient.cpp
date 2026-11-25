@@ -4,6 +4,8 @@
 #include <QNetworkRequest>
 #include <QRegularExpression>
 #include <QUrl>
+#include <QCoreApplication>
+#include <QDebug>
 
 SyncClient::SyncClient(Store &storage, QObject *parent) : QObject(parent), store(storage), network(this)
 {
@@ -13,7 +15,7 @@ SyncClient::SyncClient(Store &storage, QObject *parent) : QObject(parent), store
 void SyncClient::configure(const QString &url, const QString &deviceKey, bool allowLoopback)
 {
     ensure(!inFlight, QStringLiteral("正在同步，请稍后更改连接"));
-    timer.stop(); base = url.trimmed(); key = deviceKey.trimmed();
+    timer.stop(); identified = false; base = url.trimmed(); key = deviceKey.trimmed();
     while (base.endsWith('/')) base.chop(1);
     if (base.isEmpty() || key.isEmpty()) { status = QStringLiteral("尚未配置服务器和设备密钥"); return; }
     const QUrl address(base);
@@ -26,11 +28,24 @@ void SyncClient::configure(const QString &url, const QString &deviceKey, bool al
 void SyncClient::request()
 {
     if (inFlight || base.isEmpty() || key.isEmpty()) return;
+    // 认证握手只读取账户身份；匹配本地绑定前不构造或上传任何业务批次。
+    if (!identified) {
+        QNetworkRequest request(QUrl(base + "/v1/device")); request.setRawHeader("X-Lyushi-Protocol","4"); request.setRawHeader("Authorization","Bearer " + key.toUtf8()); request.setTransferTimeout(15000);
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);
+        inFlight=true; auto *reply=network.get(request);
+        connect(reply,&QNetworkReply::finished,this,[this,reply] { inFlight=false;
+            try { const int code=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(); ensure(reply->error()==QNetworkReply::NoError && code==200,code==401 ? QStringLiteral("设备密钥无效、已撤销或账户已停用") : code==426 ? QStringLiteral("服务器要求升级至 0.6.0 或更新版本") : QStringLiteral("本机已保存，等待验证账户"));
+                const auto bytes=reply->readAll(); ensure(bytes.size()<=16384,QStringLiteral("账户响应过大")); const auto identity=QJsonDocument::fromJson(bytes).object();
+                store.bindAccount(identity["userId"].toString(),identity["serverId"].toString()); identified=true; QTimer::singleShot(0,this,[this] { this->request(); });
+            } catch (const std::exception &error) { if(QCoreApplication::arguments().contains("--sync-once")) qWarning().noquote() << "Account handshake:" << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() << reply->errorString(); failed=true;status=QString::fromUtf8(error.what());backoff=qMin(60000,backoff*2);timer.setInterval(backoff);if(updated)updated(false,false);if(settled)settled(false); }
+            reply->deleteLater();
+        }); return;
+    }
     try {
         const auto body = store.syncRequest(); const auto sent = body["operations"].toArray();
         QNetworkRequest request(QUrl(base + "/v1/sync")); request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
         // 协议能力声明用于服务器在事务开始前阻止旧客户端误处理分心分段。
-        request.setRawHeader("X-Lyushi-Protocol", "3");
+        request.setRawHeader("X-Lyushi-Protocol", "4");
         request.setRawHeader("Authorization", "Bearer " + key.toUtf8()); request.setTransferTimeout(15000);
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
         inFlight = true; auto *reply = network.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
@@ -39,7 +54,7 @@ void SyncClient::request()
             inFlight = false;
             try {
                 const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                ensure(reply->error() == QNetworkReply::NoError && code == 200, code == 401 ? QStringLiteral("设备密钥无效或已撤销") : code == 426 ? QStringLiteral("服务器要求升级至 0.5.0 或更新版本") : code == 409 ? QStringLiteral("同步未提交，请核对服务器身份和数据版本") : QStringLiteral("本机已保存，等待重连"));
+                ensure(reply->error() == QNetworkReply::NoError && code == 200, code == 401 ? QStringLiteral("设备密钥无效或已撤销") : code == 426 ? QStringLiteral("服务器要求升级至 0.6.0 或更新版本") : code == 409 ? QStringLiteral("同步未提交，请核对服务器身份和数据版本") : QStringLiteral("本机已保存，等待重连"));
                 QJsonParseError error; const auto bytes = reply->readAll(); ensure(bytes.size() <= 8 * 1024 * 1024, QStringLiteral("同步响应过大"));
                 const auto document = QJsonDocument::fromJson(bytes, &error); ensure(error.error == QJsonParseError::NoError && document.isObject(), QStringLiteral("服务器响应无效"));
                 const auto response = document.object(); const bool changed = store.acceptSync(response, sent), reconnected = failed;

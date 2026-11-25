@@ -10,7 +10,7 @@ class SyncClient : public QObject {
     QNetworkAccessManager network;
     QTimer timer;
     QString base, key;
-    bool inFlight = false, failed = false;
+    bool inFlight = false, failed = false, identified = false;
     int backoff = 5000;
 public:
     QString status = QStringLiteral("尚未配置同步");

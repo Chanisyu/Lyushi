@@ -40,6 +40,10 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private val preferences by lazy { getSharedPreferences("settings", Context.MODE_PRIVATE) }
+    private var loadedProfile = "local"
+    private var accountReloadQueued = false
+    private fun reloadAccount() { if(!accountReloadQueued && !isDestroyed) { accountReloadQueued=true;recreate() } }
+    private val profileListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _,name -> if(name=="accountProfile" && loadedProfile!=activeProfile(preferences)) reloadAccount() }
     private var selected = ""
     private var screen = "main"
     private var busy = false
@@ -58,7 +62,7 @@ class MainActivity : Activity() {
         if (android.os.Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
             if (!busy) { if (screen != "main") showMain() else finish() }
         }
-        store = Store(this); selected = preferences.getString("ledger", "") ?: ""; fileMode = savedInstanceState?.getInt("fileMode") ?: 0
+        loadedProfile=activeProfile(preferences); store = Store(this, accountDatabase(loadedProfile)); preferences.registerOnSharedPreferenceChangeListener(profileListener); selected = preferences.getString("ledger."+activeProfile(preferences), "") ?: ""; fileMode = savedInstanceState?.getInt("fileMode") ?: 0
         sync = SyncClient(applicationContext, store, preferences, worker, handler) { changed, reconnected ->
             if (!isDestroyed) safely {
                 if (changed && !busy) {
@@ -79,6 +83,7 @@ class MainActivity : Activity() {
     override fun onStop() { handler.removeCallbacks(refresh); super.onStop() }
     override fun onSaveInstanceState(outState: Bundle) { outState.putInt("fileMode", fileMode); super.onSaveInstanceState(outState) }
     override fun onDestroy() {
+        preferences.unregisterOnSharedPreferenceChangeListener(profileListener)
         sync.close(); dialogs.toList().forEach { it.dismiss() }
         // 排在全部文件操作之后关闭数据库，避免后台任务与页面销毁竞争句柄。
         worker.execute { store.close() }; worker.shutdown(); super.onDestroy()
@@ -111,7 +116,7 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, if (ledgers.isEmpty()) listOf("请先新建时间账本") else ledgers.map { it.getString("name") })
             if (ledgers.isNotEmpty()) setSelection(ledgers.indexOfFirst { it.getString("id") == selected })
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) { if (store.active() == null && position in ledgers.indices) { selected = ledgers[position].getString("id"); preferences.edit().putString("ledger", selected).apply() } }
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) { if (store.active() == null && position in ledgers.indices) { selected = ledgers[position].getString("id"); preferences.edit().putString("ledger."+activeProfile(preferences), selected).apply() } }
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
@@ -284,20 +289,44 @@ class MainActivity : Activity() {
     }
     /** 密钥通过 Keystore 单独保存，不写普通设置、不带入备份；记录时锁定连接设置。 */
     private fun showSettings() {
-        screen = "settings"; page("设置"); root.addView(label("语言：简体中文"))
-        root.addView(label("版本 ${BuildConfig.VERSION_NAME}（测试版）",14f))
-        root.addView(label("主题", 14f)); val theme = Spinner(this).apply { adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, listOf("跟随系统", "白天", "黑夜")); setSelection(preferences.getInt("theme", 0)) }; root.addView(theme)
-        // 服务器地址由用户填写，空默认值不覆盖既有配置。
-        val server = EditText(this).apply { hint = "服务器地址 https://"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI; setText(preferences.getString("server", "")); isEnabled = store.active() == null }; root.addView(server)
-        val key = EditText(this).apply { hint = "设备密钥"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD; isEnabled = store.active() == null }; root.addView(key)
-        var keyLoaded = false
-        safely { key.setText(SecretVault(this).read()); keyLoaded = true }
-        root.addView(label("填写设备密钥后自动同步；离线仍可记录。密钥存入系统安全存储，冲突双方分别保留。", 14f))
-        root.addView(button("保存设置") {
-            val address = server.text.toString().trim()
-            if (store.active() == null) { check(address.isEmpty() || android.net.Uri.parse(address).let { it.scheme == "https" && !it.host.isNullOrBlank() && it.userInfo == null && it.fragment == null && it.query == null }) { "请输入不含用户名、密码、查询或片段的 HTTPS 地址" }; check(keyLoaded || key.text.isNotEmpty()) { "原密钥未能读取，请重新填写" }; val secret = key.text.toString().trim(); check(secret.isEmpty() || Regex("^[0-9a-f]{64}$").matches(secret)) { "设备密钥应为 64 位小写十六进制文字" }; SecretVault(this).write(secret) }
-            check(preferences.edit().putInt("theme", theme.selectedItemPosition).putString("server", address).commit()) { "设置保存失败" }; recreate()
-        }); root.addView(button("返回") { showMain() })
+        screen = "settings"; page("设置"); root.addView(label("语言：简体中文")); root.addView(label("版本 ${BuildConfig.VERSION_NAME}",14f))
+        root.addView(label("主题",14f)); val theme = Spinner(this).apply { adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,listOf("跟随系统","白天","黑夜"));setSelection(preferences.getInt("theme",0)) };root.addView(theme)
+        root.addView(button("保存外观") { check(!busy) { "正在处理账户连接" };check(preferences.edit().putInt("theme",theme.selectedItemPosition).commit()) { "设置保存失败" };recreate() })
+        val current = activeProfile(preferences)
+        val ids = listOf("local") + (preferences.getStringSet("accountProfiles",emptySet()) ?: emptySet()).sorted()
+        root.addView(label("已保存账户",14f));val profiles=Spinner(this).apply { adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,ids.map { if(it=="local") "单机数据" else preferences.getString("accounts.$it.name",it.take(12))!! });setSelection(ids.indexOf(current).coerceAtLeast(0));isEnabled=store.active()==null };root.addView(profiles)
+        root.addView(button("切换至所选数据空间") { idle();check(preferences.edit().putString("accountProfile",ids[profiles.selectedItemPosition]).commit()) { "账户切换保存失败" };reloadAccount() }.apply { isEnabled=store.active()==null })
+        val server=EditText(this).apply { hint="服务器地址 https://";setSingleLine(true);setText(accountAddress(preferences));isEnabled=store.active()==null };root.addView(server)
+        val key=EditText(this).apply { hint="后台生成的设备密钥";inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD;isEnabled=store.active()==null };root.addView(key)
+        safely { key.setText(SecretVault(this,profileVault(current)).read()) }
+        root.addView(label("连接前先验证账户；不同账户的数据与密钥独立保存。记录期间禁止切换账户。",14f))
+        root.addView(button("验证并连接账户") {
+            idle();val address=server.text.toString().trim().trimEnd('/');val secret=key.text.toString().trim();busy=true
+            worker.execute {
+                val result=runCatching { check(store.active()==null) { "请先结束当前记录" }; deviceIdentity(address,secret) }
+                runOnUiThread { if(!isDestroyed) { busy=false;result.fold(onSuccess={identity ->
+                    fun connect(merge: Boolean) {
+                        idle();busy=true
+                        worker.execute {
+                            val saved=runCatching {
+                                check(store.active()==null) { "记录状态发生变化，请稍后重试" }
+                                val backup=if(merge) store.backup() else null
+                                val profile=accountProfileId(address,identity)
+                                Store(this,accountDatabase(profile)).use { target -> target.bindAccount(identity.getString("userId"),identity.getString("serverId"));if(backup!=null)target.importBackup(backup) }
+                                SecretVault(this,profileVault(profile)).write(secret)
+                                val known=(preferences.getStringSet("accountProfiles",emptySet())?:emptySet()).toMutableSet().apply { add(profile) }
+                                check(preferences.edit().putString("accounts.$profile.server",address).putString("accounts.$profile.name",identity.getString("displayName")+" · "+identity.getString("username")).putStringSet("accountProfiles",known).putString("accountProfile",profile).commit()) { "账户设置保存失败" }
+                            }
+                            runOnUiThread { if(!isDestroyed) { busy=false;if(saved.isSuccess)reloadAccount() else Toast.makeText(this,saved.exceptionOrNull()?.message?:"连接未完成",Toast.LENGTH_LONG).show() } }
+                        }
+                    }
+                    if(current=="local"&&store.entities("ledger",true).isNotEmpty()) AlertDialog.Builder(this).setTitle("首次连接账户").setMessage("连接账户“${identity.getString("displayName")}”。是否将当前单机数据合并到该账户？选择否将使用账户独立数据，单机数据仍保留。")
+                        .setPositiveButton("合并") { _,_ -> safely { connect(true) } }.setNeutralButton("不合并") { _,_ -> safely { connect(false) } }.setNegativeButton("取消",null).create().present()
+                    else safely { connect(false) }
+                },onFailure={Toast.makeText(this,it.message?:"账户验证未完成",Toast.LENGTH_LONG).show()}) } }
+            }
+        }.apply { isEnabled=store.active()==null })
+        root.addView(button("返回") { check(!busy) { "正在验证账户" };showMain() })
     }
     /** Android 文件选择器授予单文件访问权；取消选择不修改数据。 */
     private fun chooseFile(mode: Int) {
@@ -351,9 +380,11 @@ class MainActivity : Activity() {
             val command = JSONObject(commandFile.readText(Charsets.UTF_8)); commandFile.delete()
             val report = File(filesDir, "sync-result.json"); report.delete()
             worker.execute {
-                val result = runCatching { Store(this, "network-test.sqlite").use { isolated ->
+                val result = runCatching { Store(this, if(command.has("testId")) { val id=command.getString("testId");check(Regex("^[a-z0-9-]{1,64}$").matches(id));"network-$id.sqlite" } else "network-test.sqlite").use { isolated ->
                     when (command.getString("action")) {
                         "seed" -> isolated.start(isolated.addLedger("三端验收"), "跨进程恢复")
+                        "distract" -> isolated.distract(command.optString("task","分心"),"",System.currentTimeMillis(),isolated.active()!!.getString("version"))
+                        "resume-focus" -> isolated.resumeFocus(System.currentTimeMillis(),isolated.active()!!.getString("version"))
                         "finish" -> isolated.finish()
                         "edit" -> { val record = isolated.entities("record").first { !it.isNull("ended") && !it.getBoolean("deleted") }; isolated.edit(record.getString("id"), record.getString("ledgerId"), command.getString("task"), record.getLong("started"), record.getLong("ended")) }
                         "pull" -> Unit

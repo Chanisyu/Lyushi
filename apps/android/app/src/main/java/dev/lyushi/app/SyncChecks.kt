@@ -9,6 +9,14 @@ import org.json.JSONObject
  * 场景覆盖远端接手、并发、分页保护、删除、备份隔离及响应失败的事务回滚。
  */
 internal fun runSyncChecks(context: Context): JSONObject {
+    // 账户绑定不能更换用户或服务器；不同文件完整隔离账本与待上传队列。
+    context.deleteDatabase("account-a-check.sqlite");context.deleteDatabase("account-b-check.sqlite")
+    Store(context,"account-a-check.sqlite").use { account ->
+        account.addLedger("账户甲");account.bindAccount("a".repeat(64),"1".repeat(64))
+        check(runCatching { account.bindAccount("b".repeat(64),"2".repeat(64)) }.isFailure)
+        Store(context,"account-b-check.sqlite").use { other -> check(other.entities("ledger").isEmpty());other.bindAccount("b".repeat(64),"2".repeat(64)) }
+        check(account.entities("ledger").size==1)
+    }
     runFocusChecks(context)
     context.deleteDatabase("protocol-check.sqlite")
     return Store(context,"protocol-check.sqlite").use { store ->

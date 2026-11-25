@@ -5,6 +5,7 @@
 #include "store.h"
 #include "vault.h"
 #include "syncclient.h"
+#include "profiles.h"
 #include "ui-language.h"
 #include <QtWidgets>
 #include <QJsonDocument>
@@ -13,6 +14,7 @@
 #include <QSslSocket>
 #include <QUuid>
 #include <QPointer>
+#include <QCryptographicHash>
 #include <algorithm>
 
 /** 固定北京时间；时长独立按总小时数显示，超过一天也不会回绕。 */
@@ -230,31 +232,8 @@ class Window : public QWidget {
         fill(); dialog.exec(); reload();
     }
     /** 外观属于本机设置；密钥单独进入系统安全存储，记录时锁定连接配置。 */
-    void settings()
-    {
-        QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("设置")); QFormLayout layout(&dialog);
-        layout.addRow(QStringLiteral("版本"), new QLabel(QCoreApplication::applicationVersion() + QStringLiteral("（测试版）")));
-        QComboBox language; language.addItem(QStringLiteral("简体中文")); layout.addRow(QStringLiteral("语言"), &language);
-        QComboBox theme; theme.addItems({QStringLiteral("跟随系统"), QStringLiteral("白天"), QStringLiteral("黑夜")}); theme.setCurrentIndex(QSettings().value("theme", 0).toInt()); layout.addRow(QStringLiteral("主题"), &theme);
-        // 新安装由用户填写服务器地址，已有设置保持有效。
-        QLineEdit server(QSettings().value("server", "").toString()); server.setPlaceholderText("https://"); server.setEnabled(store.active().isEmpty()); layout.addRow(QStringLiteral("服务器地址"), &server);
-        QLineEdit key; key.setEchoMode(QLineEdit::Password); key.setEnabled(store.active().isEmpty()); layout.addRow(QStringLiteral("设备密钥"), &key);
-        bool loaded = false; safely(&dialog, [&] { key.setText(Vault::read()); loaded = true; });
-        QLabel note(QStringLiteral("填写设备密钥后自动同步；离线仍可记录。密钥使用系统安全存储，冲突版本分别保留。")); note.setWordWrap(true); layout.addRow(&note);
-        QDialogButtonBox buttons(QDialogButtonBox::Save | QDialogButtonBox::Cancel); layout.addRow(&buttons);
-        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-        connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] { safely(&dialog, [&] {
-            const auto address = server.text().trimmed(); const QUrl url(address);
-            ensure(address.isEmpty() || (url.isValid() && url.scheme() == "https" && !url.host().isEmpty() && url.userInfo().isEmpty() && !url.hasQuery() && !url.hasFragment()), QStringLiteral("请输入不含用户名、密码、查询或片段的 HTTPS 地址"));
-            if (store.active().isEmpty()) {
-                ensure(sync.canConfigure(), QStringLiteral("正在同步，请稍后保存连接设置"));
-                if (loaded || !key.text().isEmpty()) Vault::write(key.text().trimmed());
-                sync.configure(address, key.text().trimmed());
-            }
-            QSettings prefs; prefs.setValue("theme", theme.currentIndex()); prefs.setValue("server", address); prefs.sync(); ensure(prefs.status() == QSettings::NoError, QStringLiteral("设置保存失败")); applyTheme(); dialog.accept();
-        }); });
-        dialog.exec();
-    }
+    void settings() { if(showAccountSettings(this,store,sync)){ selected.clear(); reload(); applyTheme(); } }
+
 public:
     explicit Window(Store &storage) : store(storage), sync(storage, this)
     {
@@ -326,7 +305,7 @@ public:
             if (changed) { if (!store.active().isEmpty()) closeManagementDialogs(this); reload(); }
             refresh(); if (reconnected) QMessageBox::information(this, QStringLiteral("已重新连接"), QStringLiteral("已重新连接服务器，双方内容均已保留。发现的冲突可在主页面查看。"));
         };
-        QTimer::singleShot(0, this, [this] { try { sync.configure(QSettings().value("server", "").toString(), Vault::read()); }
+        QTimer::singleShot(0, this, [this] { try { sync.configure(accountServer(accountProfile()), Vault::read(accountProfile())); }
             catch (const std::exception &error) { sync.status = QString::fromUtf8(error.what()); refresh(); } });
     }
 };
@@ -336,6 +315,11 @@ void focusSelfTest(const QString &directory);
 static void selfTest(Store &store, const QString &directory)
 {
     focusSelfTest(directory);
+    { Store profiles(QDir(directory).filePath("profile-a")); profiles.addLedger("账户甲"); profiles.bindAccount(QString(64,'a'),QString(64,'1'));
+      bool rejected=false;try{profiles.bindAccount(QString(64,'b'),QString(64,'2'));}catch(...){rejected=true;}ensure(rejected,"foreign account binding accepted");
+      profiles.useDirectory(QDir(directory).filePath("profile-b"));ensure(profiles.entities("ledger").isEmpty(),"account data mixed");profiles.bindAccount(QString(64,'b'),QString(64,'2'));
+      profiles.useDirectory(QDir(directory).filePath("profile-a"));ensure(profiles.entities("ledger").size()==1,"account switch lost data"); }
+
     ensure(QCoreApplication::translate("QPlatformTheme", "Save") == QStringLiteral("保存"), "Chinese standard buttons unavailable");
     // 标签自检独立于既有记录计数，覆盖删候选保历史、去重、重建及 v1 备份读取。
     Store tagged(QDir(directory).filePath("tag-check")); const auto taggedBook = tagged.addLedger("标签测试");
@@ -384,7 +368,7 @@ static void selfTest(Store &store, const QString &directory)
 
 int main(int argc, char **argv)
 {
-    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.5.0");
+    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.6.0");
     QLocale::setDefault(QLocale(QLocale::Chinese, QLocale::China));
     SimplifiedChineseTranslator translator; app.installTranslator(&translator);
     // 命令行检查和截图的设置也使用隔离目录，不覆盖日常使用时选择的账本或主题。
@@ -393,13 +377,17 @@ int main(int argc, char **argv)
     try {
         const auto args = app.arguments(); const auto mode = args.value(1);
         if (mode == "--configure") {
+            // 命令行配置与日常窗口共用实例锁，避免后台修改另一个窗口正在使用的账户选择。
+            const auto root=QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);QDir().mkpath(root);QLockFile configurationLock(root+"/application.lock");ensure(configurationLock.tryLock(0),QStringLiteral("请先关闭柳时窗口再通过命令行配置账户"));
             QFile key(args.value(3)); ensure(key.open(QIODevice::ReadOnly) && key.size() <= 256, "cannot read device key");
             const auto secret = QString::fromUtf8(key.readAll()).trimmed(); const QUrl address(args.value(2));
             ensure(address.scheme() == "https" && !address.host().isEmpty() && address.userInfo().isEmpty(), "invalid server address");
-            Vault::write(secret); QSettings().setValue("server", address.toString()); return 0;
+            auto url=address.toString();while(url.endsWith('/'))url.chop(1);const auto info=identifyAccount(url,secret);
+            const auto id=QString::fromLatin1(QCryptographicHash::hash((url+"\n"+info["userId"].toString()+"\n"+info["serverId"].toString()).toUtf8(),QCryptographicHash::Sha256).toHex());
+            Store target(accountDirectory(id));target.bindAccount(info["userId"].toString(),info["serverId"].toString());Vault::write(secret,id);QSettings settings;auto known=settings.value("accountProfiles").toStringList();if(!known.contains(id))known.append(id);settings.setValue("accountProfiles",known);settings.setValue("accounts/"+id+"/server",url);settings.setValue("accounts/"+id+"/name",info["displayName"].toString()+" · "+info["username"].toString());settings.setValue("accountProfile",id);return 0;
         }
-        const auto directory = args.value(2, QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation));
-        QLockFile lock(QDir(directory).filePath("instance.lock")); QDir().mkpath(directory);
+        const auto directory = args.value(2, accountDirectory(accountProfile()));
+        QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)); QLockFile lock(mode.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/application.lock" : QDir(directory).filePath("instance.lock")); QDir().mkpath(directory);
         ensure(lock.tryLock(0), QStringLiteral("此数据目录已由另一个柳时进程打开")); Store store(directory);
         if (mode == "--self-test") { selfTest(store, directory); puts("PASS: ledgers, active lock, import validation/rollback/conflicts, tombstones, CSV, bounded batches"); return 0; }
         if (mode == "--ui-lock-test") {

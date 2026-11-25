@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -73,13 +71,9 @@ func TestTagBoundsAndAtomicRollback(t *testing.T) {
 // 旧客户端在任何写事务前收到明确升级响应；错误密钥仍保持认证拒绝语义。
 func TestProtocolUpgradeGate(t *testing.T) {
 	s := testService(t)
-	key := randomID()
-	hash := sha256.Sum256([]byte(key))
-	if _, err := s.db.Exec("INSERT INTO devices(id,label,token_hash) VALUES('upgrade-test','test',?)", hex.EncodeToString(hash[:])); err != nil {
-		t.Fatal(err)
-	}
+	_, key := testAccountDevice(t, s, "member", "user")
 	body, _ := json.Marshal(Request{Operations: []Operation{ledgerOp("rejected-ledger", "", "不应写入")}})
-	for _, version := range []string{"", "1", "2", "4"} {
+	for _, version := range []string{"", "1", "2", "3", "5"} {
 		r := httptest.NewRequest(http.MethodPost, "/v1/sync", bytes.NewReader(body))
 		r.Header.Set("Authorization", "Bearer "+key)
 		r.Header.Set("X-Lyushi-Protocol", version)
