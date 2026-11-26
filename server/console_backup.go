@@ -149,12 +149,18 @@ func (s *Service) importWeb(actor string, backup map[string]any) (map[string]int
 	}
 	ledgerIDs := map[string]bool{}
 	seen := map[string]bool{}
+	pendingArchives := map[string]bool{}
 	all := []Operation{}
 	added, duplicate, conflictCount := 0, 0, 0
 	archive := func(kind string, original map[string]any) error {
 		content := map[string]any{"kind": kind, "entity": original, "archived": true}
 		raw, _ := json.Marshal(content)
 		id := tokenHash(string(raw))
+		// 同一文件可能在记录与冲突数组中重复携带相同内容。仅已计划写入的第一份计为新增冲突。
+		if pendingArchives[id] {
+			duplicate++
+			return nil
+		}
 		heads, err := s.headsFor("archive", id)
 		if err != nil {
 			return err
@@ -168,6 +174,7 @@ func (s *Service) importWeb(actor string, backup map[string]any) (map[string]int
 		if err = validate(op); err != nil {
 			return errors.New("备份冲突内容无效")
 		}
+		pendingArchives[id] = true
 		all = append(all, op)
 		conflictCount++
 		return nil
@@ -252,19 +259,7 @@ func (s *Service) importWeb(actor string, backup map[string]any) (map[string]int
 			return nil, err
 		}
 	}
-	// 同一文件内重复冲突只保留一个版本，避免尚未提交的档案被重复创建。
-	unique := []Operation{}
-	operations := map[string]bool{}
-	for _, op := range all {
-		key := op.Kind + ":" + op.EntityID
-		if operations[key] {
-			duplicate++
-			continue
-		}
-		operations[key] = true
-		unique = append(unique, op)
-	}
-	if err := s.applyWeb(actor, unique); err != nil {
+	if err := s.applyWeb(actor, all); err != nil {
 		return nil, errors.New("导入未提交，原有数据保持不变")
 	}
 	return map[string]int{"added": added, "duplicate": duplicate, "conflicts": conflictCount}, nil

@@ -331,3 +331,31 @@ func TestWebImportExportAndRollback(t *testing.T) {
 		t.Fatal("partial import committed")
 	}
 }
+
+// 同一份备份可在普通记录和旧冲突列表中携带相同内容，回执应与实际写入一致。
+func TestWebImportCountsRepeatedConflictOnce(t *testing.T) {
+	target := testService(t)
+	ledger := ledgerOp("book-version", "", "账本")
+	local := recordOp("existing", "", json.Number("1700000001000"))
+	send(t, target, 0, ledger, local)
+	incoming := recordOp("incoming", "", json.Number("1700000001000"))
+	incoming.Entity["task"] = "备份中的不同版本"
+	conflict := map[string]any{"kind": "record", "entity": incoming.Entity, "archived": true}
+	backup := map[string]any{
+		"format": "lyushi.backup", "formatVersion": json.Number("3"),
+		"ledgers": []any{ledger.Entity}, "tags": []any{}, "records": []any{incoming.Entity},
+		"conflicts": []any{conflict, conflict},
+	}
+	result, err := target.importWeb("admin", backup)
+	if err != nil || result["added"] != 0 || result["duplicate"] != 3 || result["conflicts"] != 1 {
+		t.Fatalf("第一次导入统计错误：%v, %v", result, err)
+	}
+	archives, err := target.current("archive", false)
+	if err != nil || len(archives) != 1 {
+		t.Fatalf("应只保存一个冲突档案，实际 %d：%v", len(archives), err)
+	}
+	result, err = target.importWeb("admin", backup)
+	if err != nil || result["added"] != 0 || result["duplicate"] != 4 || result["conflicts"] != 0 {
+		t.Fatalf("重复导入统计错误：%v, %v", result, err)
+	}
+}
