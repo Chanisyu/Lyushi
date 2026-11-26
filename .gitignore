@@ -29,3 +29,6 @@ deploy/activate-production.sh
 deploy/check-loopback.py
 deploy/check-production.py
 scripts/check-linux-isolated.sh
+
+# 本地功能规划及资源评估，不纳入版本控制或公开发行。
+/待实现功能.md
