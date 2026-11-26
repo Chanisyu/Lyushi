@@ -24,7 +24,7 @@ QJsonObject identifyAccount(const QString &address,const QString &key){
 
 /** 外观和已有账户可离线切换；连接新密钥时先验证归属，再决定是否合并单机数据。 */
 bool showAccountSettings(QWidget *owner,Store &store,SyncClient &sync){
- QDialog dialog(owner);dialog.setWindowTitle(QStringLiteral("设置"));QFormLayout form(&dialog);form.addRow(QStringLiteral("版本"),new QLabel("0.6.0"));form.addRow(QStringLiteral("语言"),new QLabel(QStringLiteral("简体中文")));
+ QDialog dialog(owner);dialog.setWindowTitle(QStringLiteral("设置"));QFormLayout form(&dialog);form.addRow(QStringLiteral("版本"),new QLabel("0.7.0"));form.addRow(QStringLiteral("语言"),new QLabel(QStringLiteral("简体中文")));
  QComboBox theme;theme.addItems({QStringLiteral("跟随系统"),QStringLiteral("白天"),QStringLiteral("黑夜")});theme.setCurrentIndex(QSettings().value("theme",0).toInt());form.addRow(QStringLiteral("主题"),&theme);
  QComboBox profiles;profiles.addItem(QStringLiteral("单机数据"),"local");auto saved=QSettings().value("accountProfiles").toStringList();for(const auto &id:saved)profiles.addItem(QSettings().value("accounts/"+id+"/name",id.left(12)).toString(),id);profiles.setCurrentIndex(qMax(0,profiles.findData(accountProfile())));form.addRow(QStringLiteral("已保存账户"),&profiles);
  QPushButton switchButton(QStringLiteral("切换至所选数据空间"));form.addRow(&switchButton);

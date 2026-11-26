@@ -24,6 +24,13 @@ import java.util.concurrent.Executors
  * 正式应用与原型包隔离。文件读写在单独线程执行，UI 只显示已成功保存的结果。
  */
 class MainActivity : Activity() {
+    // 进程退出后不恢复未保存的表单；同一进程内旋转屏幕可使用实例状态恢复。
+    companion object {
+        private val draftSession = java.util.UUID.randomUUID().toString()
+        // 仅供调试表单验收跨旋转比较，正式运行不会读取或设置这些值。
+        private var editorTestStage = 0
+        private var editorTestOriginal = JSONObject()
+    }
     private lateinit var store: Store
     private lateinit var root: LinearLayout
     private lateinit var task: EditText
@@ -36,10 +43,17 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var sync: SyncClient
     private val dialogs = mutableListOf<AlertDialog>()
+    private var activeEditor: AlertDialog? = null
+    private var activeDraft: ActiveMetadataDraft? = null
+    private var activeDraftName: EditText? = null
+    private var activeDraftTag: Spinner? = null
+    private var activeDraftHint: TextView? = null
     private val locked = mutableListOf<View>()
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
-    private val preferences by lazy { getSharedPreferences("settings", Context.MODE_PRIVATE) }
+    // 表单界面验收使用独立偏好与数据库，禁止继承日常账户地址或设备密钥。
+    private val activeEditorUiTest get() = BuildConfig.DEBUG && intent.getStringExtra("test_action") in listOf("active-editor-ui-test","active-editor-reopen-test")
+    private val preferences by lazy { getSharedPreferences(if (activeEditorUiTest) "active-editor-ui-settings" else "settings", Context.MODE_PRIVATE) }
     private var loadedProfile = "local"
     private var accountReloadQueued = false
     private fun reloadAccount() { if(!accountReloadQueued && !isDestroyed) { accountReloadQueued=true;recreate() } }
@@ -62,26 +76,37 @@ class MainActivity : Activity() {
         if (android.os.Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
             if (!busy) { if (screen != "main") showMain() else finish() }
         }
-        loadedProfile=activeProfile(preferences); store = Store(this, accountDatabase(loadedProfile)); preferences.registerOnSharedPreferenceChangeListener(profileListener); selected = preferences.getString("ledger."+activeProfile(preferences), "") ?: ""; fileMode = savedInstanceState?.getInt("fileMode") ?: 0
+        if (activeEditorUiTest && savedInstanceState == null && intent.getStringExtra("test_action") == "active-editor-ui-test") {
+            deleteDatabase("active-editor-ui-check.sqlite"); editorTestStage = 0
+        }
+        loadedProfile=activeProfile(preferences); store = Store(this, if (activeEditorUiTest) "active-editor-ui-check.sqlite" else accountDatabase(loadedProfile)); preferences.registerOnSharedPreferenceChangeListener(profileListener); selected = preferences.getString("ledger."+activeProfile(preferences), "") ?: ""; fileMode = savedInstanceState?.getInt("fileMode") ?: 0
         sync = SyncClient(applicationContext, store, preferences, worker, handler) { changed, reconnected ->
             if (!isDestroyed) safely {
                 if (changed && !busy) {
-                    // 远端仅改变标签或账本时保留尚未开始的事项草稿，不影响进行中状态接管。
-                    val draft = if (screen == "main" && task.isEnabled && store.active() == null) task.text.toString() else null
-                    if (store.active() != null) dialogs.toList().forEach { it.dismiss() }
-                    showMain(); if (draft != null) task.setText(draft)
+                    applySynchronizedChange()
                 }
                 else if (screen == "main") render()
                 if (reconnected) Toast.makeText(this, "已重新连接服务器，双方内容均已保留；冲突可在结束记录后查看。", Toast.LENGTH_LONG).show()
             }
         }
         showMain()
+        // 恢复旋转前输入时保留原版本，不能把旧草稿无条件套用到远端最新任务。
+        if (savedInstanceState?.getString("activeDraftSession") == draftSession) {
+            savedInstanceState.getString("activeMetadataDraft")?.let { json -> safely {
+                val draft = ActiveMetadataDraft.restore(json)
+                if (draft.profile == loadedProfile) editActive(draft)
+            } }
+        }
         // 调试入口只使用另一份私有测试数据库，不清除或填充用户的正式记录。
         if (BuildConfig.DEBUG && intent.hasExtra("test_action")) safely { debugTest(intent.getStringExtra("test_action")!!) }
     }
     override fun onStart() { super.onStart(); handler.post(refresh) }
     override fun onStop() { handler.removeCallbacks(refresh); super.onStop() }
-    override fun onSaveInstanceState(outState: Bundle) { outState.putInt("fileMode", fileMode); super.onSaveInstanceState(outState) }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt("fileMode", fileMode)
+        captureActiveDraft()?.let { outState.putString("activeMetadataDraft", it.json()); outState.putString("activeDraftSession", draftSession) }
+        super.onSaveInstanceState(outState)
+    }
     override fun onDestroy() {
         preferences.unregisterOnSharedPreferenceChangeListener(profileListener)
         sync.close(); dialogs.toList().forEach { it.dismiss() }
@@ -93,7 +118,7 @@ class MainActivity : Activity() {
     /** 统一处理用户可恢复错误，失败不会被显示为保存成功。 */
     private fun safely(block: () -> Unit) { try { block() } catch (e: Exception) { Toast.makeText(this, e.message ?: "操作失败", Toast.LENGTH_LONG).show() } }
     /** 跟踪对话框，远端开始计时时关闭管理表单，执行全设备已知的记录期间限制。 */
-    private fun AlertDialog.present() { dialogs.add(this); setOnDismissListener { dialogs.remove(this) }; show() }
+    private fun AlertDialog.present(onDismiss: () -> Unit = {}) { dialogs.add(this); setOnDismissListener { dialogs.remove(this); onDismiss() }; show() }
     private fun label(text: String, size: Float = 17f) = TextView(this).apply { this.text = text; textSize = size; setPadding(0, 12, 0, 12) }
     // 按钮可能包含用户事项，关闭系统默认大写转换，保持原文字形与大小写。
     private fun button(text: String, block: () -> Unit) = Button(this).apply { isAllCaps = false; this.text = text; setOnClickListener { safely(block) } }
@@ -106,6 +131,12 @@ class MainActivity : Activity() {
         scroll.requestApplyInsets(); root.addView(label(title, 30f))
     }
     private fun idle() { check(!busy && store.active() == null) { "请先结束记录或等待文件处理完成" } }
+    /** 同步后重建主页面并执行管理限制；活动编辑草稿独立保留并检查原前置版本。 */
+    private fun applySynchronizedChange() {
+        val draft = if (screen == "main" && task.isEnabled && store.active() == null) task.text.toString() else null
+        if (store.active() != null) dialogs.toList().filter { it !== activeEditor }.forEach { it.dismiss() }
+        showMain(); if (draft != null) task.setText(draft)
+    }
     /** 同名账本的选择按编号保存，刷新页面不改变未结束记录所属账本。 */
     private fun showMain() {
         screen = "main"; page("柳时"); clock = label(""); root.addView(clock)
@@ -122,7 +153,11 @@ class MainActivity : Activity() {
         }
         root.addView(ledgerSpinner); locked.add(ledgerSpinner)
         root.addView(button("新建账本") { idle(); promptName("新建账本", "") { selected = store.addLedger(it); showMain() } }.also { locked.add(it) })
-        task = EditText(this).apply { hint = "现在正在做什么？"; maxLines = 4; setText(current?.let { segmentRecord(it, taskSegments(it).lastIndex).getString("task") } ?: "") }; root.addView(task)
+        val taskRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        task = EditText(this).apply { hint = "现在正在做什么？"; maxLines = 4; setText(current?.let { segmentRecord(it, taskSegments(it).lastIndex).getString("task") } ?: "") }
+        taskRow.addView(task, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        if (current != null) taskRow.addView(button("修改") { editActive() })
+        root.addView(taskRow)
         // 新增及删除入口位于下拉框右侧；管理标签时保留尚未提交的事项输入。
         root.addView(label("标签（可选）", 14f))
         val tagRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -169,6 +204,49 @@ class MainActivity : Activity() {
         root.addView(button("查看保留的冲突版本") { showConflicts() }.also { locked.add(it) })
         status = label("", 13f); root.addView(status); render()
     }
+    /** 保存旋转前的最新输入；捕获本身没有任何数据库副作用。 */
+    private fun captureActiveDraft(): ActiveMetadataDraft? = activeDraft?.also {
+        it.name = activeDraftName?.text?.toString() ?: it.name
+        it.tag = activeDraftTag?.let { choice -> chosenTag(choice) } ?: it.tag
+    }
+    /** 远端更新只标记表单过期，保留文字和标签供用户核对、复制或取消。 */
+    private fun checkActiveDraft() {
+        val draft = activeDraft ?: return; val current = store.active()
+        if (current?.optString("id") != draft.id || current.optString("version") != draft.version) {
+            activeDraftHint?.text = "任务状态已更新，输入已保留。请核对主页面，取消后重新打开修改。"
+            activeEditor?.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = false
+        }
+    }
+    /**
+     * 明确保存才更新当前阶段的名称和标签；编辑过程中计时不停止。
+     * 实例状态仅保留草稿，取消及退出会丢弃；历史删除标签只保留原任务快照。
+     */
+    private fun editActive(restored: ActiveMetadataDraft? = null) {
+        // dismiss 回调由消息队列投递；已关闭的旧窗口不能阻止立即再次打开。
+        check(!busy); if (activeEditor?.isShowing == true) return
+        val draft = restored ?: checkNotNull(store.active()) { "没有进行中的记录" }.let { current ->
+            val visible = segmentRecord(current, taskSegments(current).lastIndex)
+            ActiveMetadataDraft(loadedProfile, current.getString("id"), current.getString("version"), isDistracted(current), visible.optString("tag"), visible.getString("task"), visible.optString("tag"))
+        }
+        val fields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24,0,24,0) }
+        val hint = label(if (draft.distracted) "仅修改当前分心，原任务和先前分心保持原样。计时继续。" else "名称与标签应用于本次任务的全部专注区间。计时继续。",14f)
+        fields.addView(hint)
+        val name = EditText(this).apply { setText(draft.name); maxLines = 4; contentDescription = "当前事项草稿" }; fields.addView(name)
+        fields.addView(label("标签")); val choice = tagChoice(draft.tag, true, setOf(draft.originalTag), false); fields.addView(choice)
+        val dialog = AlertDialog.Builder(this).setTitle(if (draft.distracted) "修改当前分心" else "修改当前事项")
+            .setView(ScrollView(this).apply { addView(fields) })
+            .setPositiveButton("保存",null).setNegativeButton("取消",null).create()
+        activeDraft = draft; activeDraftName = name; activeDraftTag = choice; activeDraftHint = hint; activeEditor = dialog
+        dialog.present {
+            if (activeEditor === dialog) { activeEditor = null; activeDraft = null; activeDraftName = null; activeDraftTag = null; activeDraftHint = null }
+        }
+        // show 已创建按钮，立即替换默认关闭行为；不等待异步 OnShow，避免首帧点击漏保存。
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { safely {
+            check(!busy); captureActiveDraft()
+            store.editActiveMetadata(draft.id, draft.version, draft.name, draft.tag)
+            dialog.dismiss(); showMain(); sync.request(true)
+        } }; checkActiveDraft()
+    }
     /** 表单确认时才切换状态；取消不改变原任务，远端版本变化会阻止提交。 */
     private fun startDistraction() {
         val current = checkNotNull(store.active()); check(!isDistracted(current)) { "请先返回原任务" }
@@ -190,9 +268,9 @@ class MainActivity : Activity() {
         root.addView(button("返回账本明细") { showDetails() })
     }
     /** 下拉项与显示文字分离，已删除快照不会被误认为可供新任务使用的标签。 */
-    private fun tagChoice(initial: String, keepHistorical: Boolean = false): Spinner {
+    private fun tagChoice(initial: String, keepHistorical: Boolean = false, snapshots: Set<String> = emptySet(), updateMainSelection: Boolean = true): Spinner {
         val names = store.entities("tag").map { it.getString("name") }.distinct().sorted()
-        val values = listOf("") + names + if (keepHistorical && initial.isNotEmpty() && initial !in names) listOf(initial) else emptyList()
+        val values = listOf("") + names + if (keepHistorical) (snapshots + initial).filter { it.isNotEmpty() && it !in names }.sorted() else emptyList()
         return Spinner(this).apply {
             tag = values
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, values.map {
@@ -200,7 +278,7 @@ class MainActivity : Activity() {
             })
             setSelection(values.indexOf(initial).coerceAtLeast(0))
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) { if (screen == "main" && store.active() == null) selectedTag = values[position] }
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) { if (updateMainSelection && screen == "main" && store.active() == null) selectedTag = values[position] }
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
@@ -220,6 +298,7 @@ class MainActivity : Activity() {
         elapsed.text = if (current == null) "00:00:00" else durationText(if (isDistracted(current)) now - display!!.getLong("started") else focusDuration(current, now))
         status.text = if (busy) "正在处理文件…" else if (current != null && now < display!!.getLong("started")) "设备时间早于开始时间，请核对系统时间"
             else sync.status + if (store.hasConflicts()) " · 已保留冲突版本" else ""
+        checkActiveDraft()
     }
     /** 账本名输入框不会预先执行更改，取消或空白校验失败均保留原数据。 */
     private fun promptName(title: String, initial: String, save: (String) -> Unit) {
@@ -365,6 +444,44 @@ class MainActivity : Activity() {
     }
     /** 调试检查用独立 SQLite 文件，覆盖导入、隔离和跨进程恢复；不记录设备密钥。 */
     private fun debugTest(mode: String) {
+        if (mode == "active-editor-ui-test" || mode == "active-editor-reopen-test") {
+            // 真实 Activity 旋转及表单交互验收；偏好和数据库均已在入口隔离。
+            val report = File(filesDir,"active-editor-ui-result.json")
+            fun complete(block: () -> Unit) {
+                val result = runCatching { block(); JSONObject().put("passed",true).put("phase",mode).put("record",store.active()) }
+                report.writeText(result.getOrElse { JSONObject().put("passed",false).put("error",it.stackTraceToString()) }.toString(2),Charsets.UTF_8)
+            }
+            if (mode == "active-editor-reopen-test") {
+                complete { check(activeEditor == null && activeDraft == null); check(store.active()!!.getString("task") == "已保存事项") }
+            } else if (editorTestStage == 0) {
+                report.delete(); val book=store.addLedger("表单旋转验收"); store.addTag("学习"); store.start(book,"原事项")
+                editorTestOriginal=store.active()!!; showMain(); editActive()
+                activeDraftName!!.setText("旋转前草稿"); val choice=activeDraftTag!!
+                @Suppress("UNCHECKED_CAST") val names=choice.tag as List<String>
+                choice.setSelection(names.indexOf("学习")); editorTestStage=1
+                handler.postDelayed({ requestedOrientation = if (resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT },300)
+            } else if (editorTestStage == 1) {
+                handler.postDelayed({ complete {
+                    check(activeEditor?.isShowing == true && activeDraftName!!.text.toString() == "旋转前草稿" && chosenTag(activeDraftTag!!) == "学习") { "旋转丢失草稿" }
+                    check(activeDraft!!.version == editorTestOriginal.getString("version")) { "旋转重置前置版本" }
+                    var current=store.active()!!; store.editActiveMetadata(current.getString("id"),current.getString("version"),"另一设备更正","")
+                    applySynchronizedChange()
+                    check(activeEditor?.isShowing == true && activeDraftName!!.text.toString() == "旋转前草稿" && !activeEditor!!.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled) { "远端更新未保留过期草稿" }
+                    activeEditor!!.cancel(); editActive()
+                    activeDraftName!!.setText("已保存事项"); activeEditor!!.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                    current=store.active()!!; check(current.getString("task") == "已保存事项" && current.getLong("started") == editorTestOriginal.getLong("started") && current.getString("id") == editorTestOriginal.getString("id") && current.isNull("ended") && !current.has("segments"))
+                    editActive(); activeDraftName!!.setText("取消草稿"); activeEditor!!.cancel()
+                    check(store.active()!!.getString("task") == "已保存事项")
+                    // 远端结束后仍保留输入和过期提示，取消不会重新启动任务。
+                    editActive(); activeDraftName!!.setText("结束后草稿"); store.finish(current.getLong("started")+1000,current.getString("version")); applySynchronizedChange()
+                    check(activeEditor?.isShowing == true && activeDraftName!!.text.toString() == "结束后草稿" && !activeEditor!!.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled)
+                    activeEditor!!.cancel(); check(store.active() == null)
+                    // 另开一项并留下未保存草稿，外部强制退出后验证数据库仅保留已保存值。
+                    store.start(current.getString("ledgerId"),"已保存事项"); showMain(); editActive(); activeDraftName!!.setText("退出时未保存草稿"); editorTestStage=2
+                } },300)
+            }
+            return
+        }
         if (mode == "sync-store-test") {
             val report = File(filesDir,"sync-store-result.json"); report.delete()
             // 大数据边界场景在工作线程运行，测试脚本以报告为准，不依赖界面启动等待时间。
@@ -387,6 +504,7 @@ class MainActivity : Activity() {
                         "resume-focus" -> isolated.resumeFocus(System.currentTimeMillis(),isolated.active()!!.getString("version"))
                         "finish" -> isolated.finish()
                         "edit" -> { val record = isolated.entities("record").first { !it.isNull("ended") && !it.getBoolean("deleted") }; isolated.edit(record.getString("id"), record.getString("ledgerId"), command.getString("task"), record.getLong("started"), record.getLong("ended")) }
+                        "edit-active" -> isolated.editActiveMetadata(command.getString("id"),command.getString("expectedVersion"),command.getString("task"),command.optString("tag"))
                         "pull" -> Unit
                         else -> error("未知验收操作")
                     }

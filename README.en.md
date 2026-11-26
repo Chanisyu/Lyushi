@@ -28,13 +28,13 @@ The project's source and documentation use [Apache-2.0](LICENSE). Third-party co
 
 [Published releases](https://github.com/Chanisyu/Lyushi/releases) · [Changelog](CHANGELOG.md) · [简体中文](README.md)
 
-The current source version is **0.6.0**, requiring synchronization protocol **4**. Published 0.4.0 packages do not contain distractions or multi-user functionality and cannot connect to a protocol 4 service. Build the current source to obtain:
+The current source version is **0.7.0**, requiring synchronization protocol **4**. Published 0.4.0 packages do not contain distractions, multi-user functionality or active-task editing and cannot connect to a protocol 4 service. Build the current source to obtain:
 
 | Platform | Artifact |
 | --- | --- |
-| Windows 11 x64 | `lyushi-windows-0.6.0-beta.zip`; extract all files and run `Lyushi-0.6.0/lyushi.exe` |
-| Android | `lyushi-android-0.6.0-beta.apk`, currently debug-signed |
-| Ubuntu 26.04 LTS amd64 | `lyushi_0.6.0_amd64.deb`; install with `sudo apt install ./lyushi_0.6.0_amd64.deb` |
+| Windows 11 x64 | `lyushi-windows-0.7.0-beta.zip`; extract all files and run `Lyushi-0.7.0/lyushi.exe` |
+| Android | `lyushi-android-0.7.0-beta.apk`, currently debug-signed |
+| Ubuntu 26.04 LTS amd64 | `lyushi_0.7.0_amd64.deb`; install with `sudo apt install ./lyushi_0.7.0_amd64.deb` |
 | Linux amd64 server | `lyushi-server-linux-amd64`, deployed using `deploy/` |
 
 Build artifacts are placed in `dist/` and excluded from version control. Android requires API 26 or later; Android 17 is the current test environment. Export JSON before changing APK signing certificates or replacing application data.
@@ -42,6 +42,10 @@ Build artifacts are placed in `dist/` and excluded from version control. Android
 ## Tracking and distractions
 
 Create a ledger, enter an activity, optionally select a tag, and start tracking. Stop the entry when finished. Closing the application does not end an active task. Ledger switching, account switching, details and file operations are unavailable while recording.
+
+While tracking, select **修改** (Edit) next to the activity to change its name and existing tag, then select **保存** (Save). Tracking continues while the form is open. Focus edits apply to all focus intervals of the same task; distraction edits apply only to the current distraction. Record identity, ledger, timestamps and interval boundaries remain unchanged. Tag creation and deletion remain available only while idle.
+
+If another device changes, stops or switches the task's phase, the editor retains its draft and disables stale saving. Android retains drafts across screen rotation, including the originally captured version; cancellation or a full exit discards unsaved input. See the [active-task editing specification](docs/active-task-editing.md) in Chinese. Version 0.7.0 remains compatible with the existing 0.6.0 server, protocol 4 and backup format 3; no server migration or configuration change is required.
 
 Select “分心一下” to record a temporary distraction. The original task continues until the form is confirmed; cancellation makes no change. A blank name defaults to “分心”, with no tag. “结束分心并继续” immediately restores the original task and tag. “结束全部” finishes the whole task after confirmation. Repeated distractions are supported, with one nesting level.
 
@@ -204,6 +208,8 @@ Windows developers can set the same environment variables in PowerShell before r
 
 The project includes server unit tests, desktop storage and recovery self-tests, local synchronization tests with two clients, and Android storage-protocol checks. Run tests with isolated databases and dedicated test devices.
 
+Use `scripts/test-active-editor-android.ps1 -Serial <device-serial> -AndroidSdk <SDK-path>` with a debug APK to verify the editor, actual screen rotation and process restart. The test uses separate preferences and databases without reading regular account credentials.
+
 Server unit tests:
 
 ```bash
@@ -215,6 +221,7 @@ Isolated desktop self-test on Linux:
 
 ```bash
 QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --self-test "$(mktemp -d)"
+QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --active-editor-test "$(mktemp -d)"
 ```
 
 For local Windows integration testing, first build `build/desktop-windows/lyushi.exe` and `build/lyushi-server.exe`, then run:

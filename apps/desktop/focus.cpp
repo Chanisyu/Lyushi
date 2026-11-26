@@ -68,6 +68,34 @@ void Store::resumeFocus(qint64 now, const QString &expectedVersion)
         validateRecord(record, true); save("record", record);
     });
 }
+/**
+ * 记录期间只更正元数据，不重建区间、不读取当前时刻，也不改变任务归属。
+ * 专注区间共用根事项；当前分心仅修改最后一段，已结束的分心快照保持原样。
+ * 校验与保存处于同一事务，失败时实体和上传队列同时回滚；无变化不制造新版本。
+ */
+void Store::editActiveMetadata(const QString &id, const QString &expectedVersion, const QString &task, const QString &tag)
+{
+    transaction([&] {
+        auto record = active();
+        ensure(!id.isEmpty() && !expectedVersion.isEmpty() && record["id"].toString() == id && record["version"].toString() == expectedVersion,
+            QStringLiteral("任务状态已更新，输入已保留。请核对主页面，取消后重新打开修改"));
+        const auto before = record;
+        auto parts = taskSegments(record);
+        const bool distracted = isDistracted(record);
+        auto target = distracted ? parts.last().toObject() : record;
+        bool validTag = tag.isEmpty() || target["tag"].toString() == tag;
+        for (const auto &value : entities("tag")) if (value.toObject()["name"].toString() == tag) validTag = true;
+        ensure(validTag, QStringLiteral("标签已被删除，请重新选择；输入已保留"));
+        target["task"] = task.trimmed();
+        if (tag.isEmpty()) target.remove("tag"); else target["tag"] = tag;
+        if (distracted) { parts[parts.size()-1] = target; record["segments"] = parts; }
+        else record = target;
+        validateRecord(record, true);
+        // 与阶段切换一致预留结束字段空间，避免改名后只能保存却不能结束任务。
+        ensure(taskPayloadSize(record) <= 500 * 1024, QStringLiteral("任务数据已达上限，请缩短事项名称"));
+        if (record != before) save("record", record);
+    });
+}
 /** 已结束任务的时间按区间修改，允许空隙但不允许逆序、重叠或重启计时。 */
 void Store::editSegment(const QString &id, int index, const QString &task, const QString &tag, qint64 started, qint64 ended, const QString &expectedVersion)
 {

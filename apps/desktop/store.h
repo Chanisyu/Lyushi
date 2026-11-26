@@ -39,6 +39,8 @@ public:
     void deleteTag(const QString &name);
     void start(const QString &ledgerId, const QString &task, const QString &tag = {});
     void finish(qint64 ended, const QString &expectedVersion = {});
+    /** 仅修改当前阶段的事项与标签；编号和版本共同阻止过期表单覆盖或重启计时。 */
+    void editActiveMetadata(const QString &id, const QString &expectedVersion, const QString &task, const QString &tag);
     /** 原子切换分心区间，严格校验发起操作时的任务版本。 */
     void distract(const QString &task, const QString &tag, qint64 now, const QString &expectedVersion);
     void resumeFocus(qint64 now, const QString &expectedVersion);

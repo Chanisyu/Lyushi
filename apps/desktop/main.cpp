@@ -44,7 +44,7 @@ static void closeManagementDialogs(QWidget *owner)
     QList<QPointer<QDialog>> dialogs;
     for (auto *dialog : owner->findChildren<QDialog *>()) dialogs.append(dialog);
     for (auto it = dialogs.crbegin(); it != dialogs.crend(); ++it)
-        if (*it && (*it)->isVisible()) (*it)->reject();
+        if (*it && (*it)->isVisible() && !(*it)->property("activeMetadataDraft").toBool()) (*it)->reject();
 }
 /** 使用系统色彩提示切换三种模式，避免把本机外观同步给其他设备。 */
 static void applyTheme()
@@ -53,11 +53,13 @@ static void applyTheme()
     qApp->styleHints()->setColorScheme(theme == 1 ? Qt::ColorScheme::Light : theme == 2 ? Qt::ColorScheme::Dark : Qt::ColorScheme::Unknown);
 }
 
+static void activeEditorSelfTest(Store &store);
 class Window : public QWidget {
+    friend void activeEditorSelfTest(Store &store);
     Store &store;
     SyncClient sync;
     QComboBox *ledgers, *tags;
-    QPushButton *addTagButton, *deleteTagButton;
+    QPushButton *addTagButton, *deleteTagButton, *editActiveButton;
     QLineEdit *task;
     QLabel *clock, *elapsed, *status;
     QPushButton *action, *details, *add, *distractionButton, *finishAllButton;
@@ -103,6 +105,7 @@ class Window : public QWidget {
         tags->setEnabled(!running); addTagButton->setEnabled(!running);
         deleteTagButton->setEnabled(!running && !tags->currentData().toString().isEmpty());
         task->setEnabled(!running); action->setEnabled(running || !selected.isEmpty());
+        editActiveButton->setVisible(running);
         const bool distracted = isDistracted(current);
         action->setText(distracted ? QStringLiteral("结束分心并继续") : running ? QStringLiteral("结束记录") : QStringLiteral("开始记录"));
         distractionButton->setVisible(running && !distracted); finishAllButton->setVisible(distracted);
@@ -112,6 +115,33 @@ class Window : public QWidget {
         elapsed->setText(running ? durationText(distracted ? now - visible["started"].toInteger() : focusDuration(current, now)) : "00:00:00");
         status->setText(running && now < visible["started"].toInteger() ? QStringLiteral("设备时间早于开始时间，请核对系统时间") :
             sync.status + (store.hasConflicts() ? QStringLiteral(" · 已保留冲突版本") : ""));
+    }
+    /**
+     * 草稿使用独立表单，计时刷新只更新主页面，不触碰输入。
+     * 远端变化仅显示过期提示，保留草稿；保存继续使用打开时的编号和版本。
+     */
+    void editActive()
+    {
+        const auto current = store.active(); ensure(!current.isEmpty(), QStringLiteral("没有进行中的记录"));
+        const auto display = segmentRecord(current, taskSegments(current).size()-1);
+        QDialog dialog(this); dialog.setObjectName("activeMetadataEditor"); dialog.setProperty("activeMetadataDraft", true);
+        dialog.setWindowTitle(isDistracted(current) ? QStringLiteral("修改当前分心") : QStringLiteral("修改当前事项"));
+        QFormLayout form(&dialog); QPlainTextEdit text(display["task"].toString()); text.setObjectName("activeTaskDraft"); text.setMinimumWidth(330);
+        QComboBox choice; fillTags(&choice, display["tag"].toString()); choice.setObjectName("activeTagDraft");
+        QLabel hint(isDistracted(current) ? QStringLiteral("仅修改当前分心，原任务和先前分心保持原样。计时继续。") : QStringLiteral("名称与标签应用于本次任务的全部专注区间。计时继续。")); hint.setWordWrap(true);
+        form.addRow(&hint); form.addRow(QStringLiteral("事项"), &text); form.addRow(QStringLiteral("标签"), &choice);
+        QDialogButtonBox buttons; auto *save = buttons.addButton(QStringLiteral("保存"), QDialogButtonBox::AcceptRole);
+        buttons.addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole); form.addRow(&buttons);
+        // 不能把远端状态变化解释为自动取消；用户仍能复制草稿并核对主页面。
+        auto checkState = [&] { const auto latest = store.active(); if (latest["id"] != current["id"] || latest["version"] != current["version"]) {
+            hint.setText(QStringLiteral("任务状态已更新，输入已保留。请核对主页面，取消后重新打开修改。")); save->setEnabled(false);
+        } };
+        QTimer monitor; connect(&monitor, &QTimer::timeout, &dialog, checkState); monitor.start(250);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] { safely(&dialog, [&] {
+            store.editActiveMetadata(current["id"].toString(), current["version"].toString(), text.toPlainText(), choice.currentData().toString()); dialog.accept();
+        }); });
+        if (dialog.exec() == QDialog::Accepted) { reload(); sync.request(); }
     }
     /** 新建和修改共用毫秒精度的北京时间表单，避免只改文字时截断区间边界；保存校验在存储层再次执行。 */
     void edit(QWidget *owner, const QJsonObject &record = {}, int segment = -1)
@@ -235,7 +265,7 @@ class Window : public QWidget {
     void settings() { if(showAccountSettings(this,store,sync)){ selected.clear(); reload(); applyTheme(); } }
 
 public:
-    explicit Window(Store &storage) : store(storage), sync(storage, this)
+    explicit Window(Store &storage, bool configureNetwork = true) : store(storage), sync(storage, this)
     {
         selected = QSettings().value("ledger").toString(); setWindowTitle(QStringLiteral("柳时")); resize(460, 440);
         auto *layout = new QVBoxLayout(this); layout->setContentsMargins(28, 24, 28, 24); layout->setSpacing(16);
@@ -245,7 +275,10 @@ public:
         clock = new QLabel; layout->addWidget(clock); auto *ledgerRow = new QHBoxLayout;
         ledgers = new QComboBox; ledgers->setPlaceholderText(QStringLiteral("请先新建时间账本")); ledgers->setMinimumContentsLength(12); ledgerRow->addWidget(ledgers, 1);
         add = new QPushButton(QStringLiteral("新建账本")); ledgerRow->addWidget(add); layout->addLayout(ledgerRow);
-        task = new QLineEdit; task->setPlaceholderText(QStringLiteral("现在正在做什么？")); task->setMaxLength(10000); task->setMinimumHeight(40); layout->addWidget(task);
+        auto *taskRow = new QHBoxLayout;
+        task = new QLineEdit; task->setPlaceholderText(QStringLiteral("现在正在做什么？")); task->setMaxLength(10000); task->setMinimumHeight(40); taskRow->addWidget(task, 1);
+        editActiveButton = new QPushButton(QStringLiteral("修改")); editActiveButton->setObjectName("editActiveMetadata"); taskRow->addWidget(editActiveButton); layout->addLayout(taskRow);
+        connect(editActiveButton, &QPushButton::clicked, this, [this] { safely(this, [this] { editActive(); }); });
         // 标签选择紧邻事项，右侧删除针对当前标签，新增后立即进入候选列表。
         auto *tagRow = new QHBoxLayout; tagRow->addWidget(new QLabel(QStringLiteral("标签")));
         tags = new QComboBox; tags->setObjectName("taskTag"); tagRow->addWidget(tags, 1);
@@ -305,16 +338,53 @@ public:
             if (changed) { if (!store.active().isEmpty()) closeManagementDialogs(this); reload(); }
             refresh(); if (reconnected) QMessageBox::information(this, QStringLiteral("已重新连接"), QStringLiteral("已重新连接服务器，双方内容均已保留。发现的冲突可在主页面查看。"));
         };
-        QTimer::singleShot(0, this, [this] { try { sync.configure(accountServer(accountProfile()), Vault::read(accountProfile())); }
+        if (configureNetwork) QTimer::singleShot(0, this, [this] { try { sync.configure(accountServer(accountProfile()), Vault::read(accountProfile())); }
             catch (const std::exception &error) { sync.status = QString::fromUtf8(error.what()); refresh(); } });
     }
 };
 
+/** 真实表单在离线隔离目录内验证保存、取消及远端更新后的草稿保留，不访问密钥。 */
+static void activeEditorSelfTest(Store &store)
+{
+    const auto book=store.addLedger("表单验收"); store.addTag("学习"); store.start(book,"初始事项");
+    Window window(store,false); window.show(); QString failure;
+    auto run = [&](bool remoteFinish, bool save) {
+        const auto before=store.active();
+        QTimer::singleShot(0,&window,[&,before,remoteFinish,save] {
+            auto *dialog=window.findChild<QDialog *>("activeMetadataEditor");
+            try {
+                ensure(dialog && dialog->isVisible(),"active editor not visible");
+                auto *text=dialog->findChild<QPlainTextEdit *>("activeTaskDraft"); ensure(text,"missing task draft"); text->setPlainText("未提交草稿");
+                auto *box=dialog->findChild<QDialogButtonBox *>(); ensure(box,"missing editor buttons");
+                if (save) { for (auto *button : box->buttons()) if (box->buttonRole(button)==QDialogButtonBox::AcceptRole) button->click(); return; }
+                if (remoteFinish) store.finish(before["started"].toInteger()+1000,before["version"].toString());
+                else store.editActiveMetadata(before["id"].toString(),before["version"].toString(),"另一设备更正",{});
+                closeManagementDialogs(&window); window.reload();
+                ensure(dialog->isVisible() && text->toPlainText()=="未提交草稿","remote update discarded draft");
+                QTimer::singleShot(350,dialog,[&,dialog,text,box] {
+                    try { ensure(text->toPlainText()=="未提交草稿","timer overwrote draft");
+                        for (auto *button : box->buttons()) if (box->buttonRole(button)==QDialogButtonBox::AcceptRole) ensure(!button->isEnabled(),"stale save remained enabled");
+                    } catch(const std::exception &error) { failure=QString::fromUtf8(error.what()); }
+                    dialog->reject();
+                });
+            } catch(const std::exception &error) { failure=QString::fromUtf8(error.what()); if(dialog)dialog->reject(); }
+        });
+        window.editActive(); ensure(failure.isEmpty(),failure);
+    };
+    run(false,false); ensure(store.active()["task"]=="另一设备更正","cancel saved stale draft");
+    const auto before=store.active(); const auto pending=store.pendingCount();
+    run(false,true); auto expected=before; expected["task"]="未提交草稿"; auto saved=store.active(); expected.remove("version");expected.remove("revision");saved.remove("version");saved.remove("revision");
+    ensure(expected==saved && store.pendingCount()==pending+1,"editor save changed timeline");
+    run(true,false); ensure(store.active().isEmpty(),"stale editor restarted stopped task");
+}
+
 /** 自检使用调用者指定的隔离目录，覆盖跨进程恢复、账本隔离、删除传播数据与导入回滚。 */
 void focusSelfTest(const QString &directory);
+void activeMetadataSelfTest(const QString &directory);
 static void selfTest(Store &store, const QString &directory)
 {
     focusSelfTest(directory);
+    activeMetadataSelfTest(directory);
     { Store profiles(QDir(directory).filePath("profile-a")); profiles.addLedger("账户甲"); profiles.bindAccount(QString(64,'a'),QString(64,'1'));
       bool rejected=false;try{profiles.bindAccount(QString(64,'b'),QString(64,'2'));}catch(...){rejected=true;}ensure(rejected,"foreign account binding accepted");
       profiles.useDirectory(QDir(directory).filePath("profile-b"));ensure(profiles.entities("ledger").isEmpty(),"account data mixed");profiles.bindAccount(QString(64,'b'),QString(64,'2'));
@@ -368,7 +438,7 @@ static void selfTest(Store &store, const QString &directory)
 
 int main(int argc, char **argv)
 {
-    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.6.0");
+    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.7.0");
     QLocale::setDefault(QLocale(QLocale::Chinese, QLocale::China));
     SimplifiedChineseTranslator translator; app.installTranslator(&translator);
     // 命令行检查和截图的设置也使用隔离目录，不覆盖日常使用时选择的账本或主题。
@@ -390,6 +460,11 @@ int main(int argc, char **argv)
         QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)); QLockFile lock(mode.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/application.lock" : QDir(directory).filePath("instance.lock")); QDir().mkpath(directory);
         ensure(lock.tryLock(0), QStringLiteral("此数据目录已由另一个柳时进程打开")); Store store(directory);
         if (mode == "--self-test") { selfTest(store, directory); puts("PASS: ledgers, active lock, import validation/rollback/conflicts, tombstones, CSV, bounded batches"); return 0; }
+        if (mode == "--active-editor-test") {
+            // 窗口自检的账本选择也隔离到测试目录，避免改变日常 QSettings。
+            QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory+"/settings");
+            activeEditorSelfTest(store); puts("PASS: active editor save, draft retention and stale-state guard"); return 0;
+        }
         if (mode == "--ui-lock-test") {
             QWidget owner; QDialog outer(&owner), inner(&outer); outer.setModal(true); inner.setModal(true);
             outer.show(); inner.show(); QCoreApplication::processEvents();
@@ -418,6 +493,7 @@ int main(int argc, char **argv)
             QFile input(args.value(3)); ensure(input.open(QIODevice::ReadOnly) && input.size() <= 1024 * 1024, "invalid command file");
             const auto command = QJsonDocument::fromJson(input.readAll()).object(); const auto action = command["action"].toString();
             if (action == "edit") store.editRecord(command["id"].toString(), command["ledgerId"].toString(), command["task"].toString(), command["started"].toInteger(), command["ended"].toInteger());
+            else if (action == "edit-active") store.editActiveMetadata(command["id"].toString(), command["expectedVersion"].toString(), command["task"].toString(), command["tag"].toString());
             else if (action == "delete") store.deleteRecord(command["id"].toString());
             else if (action == "add-tag") store.addTag(command["name"].toString());
             else if (action == "delete-tag") store.deleteTag(command["name"].toString());

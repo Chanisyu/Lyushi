@@ -28,13 +28,13 @@
 
 [已发布版本](https://github.com/Chanisyu/Lyushi/releases) · [更新记录](CHANGELOG.md) · [English](README.en.md)
 
-当前源码版本为 **0.6.0**，同步协议为 **4**。已发布的 0.4.0 安装包不包含分心与多用户功能，也不能连接协议 4 服务端。0.6.0 可按下文从源码构建，生成文件如下：
+当前源码版本为 **0.7.0**，同步协议为 **4**。已发布的 0.4.0 安装包不包含分心、多用户及记录期间编辑功能，也不能连接协议 4 服务端。0.7.0 可按下文从源码构建，生成文件如下：
 
 | 平台 | 文件 | 使用方式 |
 | --- | --- | --- |
-| Windows 11 x64 | `lyushi-windows-0.6.0-beta.zip` | 完整解压，运行 `Lyushi-0.6.0/lyushi.exe`，保留同目录运行库 |
-| Android | `lyushi-android-0.6.0-beta.apk` | 在系统文件管理器安装；当前采用调试签名 |
-| Ubuntu 26.04 LTS amd64 | `lyushi_0.6.0_amd64.deb` | 执行 `sudo apt install ./lyushi_0.6.0_amd64.deb` |
+| Windows 11 x64 | `lyushi-windows-0.7.0-beta.zip` | 完整解压，运行 `Lyushi-0.7.0/lyushi.exe`，保留同目录运行库 |
+| Android | `lyushi-android-0.7.0-beta.apk` | 在系统文件管理器安装；当前采用调试签名 |
+| Ubuntu 26.04 LTS amd64 | `lyushi_0.7.0_amd64.deb` | 执行 `sudo apt install ./lyushi_0.7.0_amd64.deb` |
 | Linux amd64 服务端 | `lyushi-server-linux-amd64` | 配合 `deploy/` 中的 systemd 与 Caddy 配置部署 |
 
 构建产物位于 `dist/`，不纳入源码版本控制。Android 最低要求为 Android 8.0（API 26），当前验证环境为 Android 17。不同签名的 APK 通常不能直接覆盖安装；迁移前应导出 JSON 备份。桌面数据与程序文件分别保存，替换安装包不应覆盖数据目录。
@@ -46,6 +46,7 @@
 | 独立账本 | 新建、选择、改名及确认删除；各账本分别管理记录 |
 | 任务标签 | 选择一个可选标签，新建和删除候选项；历史快照继续保留 |
 | 开始与结束 | 保存实际起止时刻并显示读秒，关闭应用不自动结束记录 |
+| 记录期间编辑 | 保存当前事项名称与标签，计时继续，任务身份与时间边界保持不变 |
 | 分心与恢复 | 临时记录其他事项，一键恢复原任务及标签，分心不计入有效时长 |
 | 明细管理 | 补记、修改已结束任务、编辑分段起止时间及删除整条任务 |
 | 备份与表格 | JSON 合并恢复并保留不同版本；CSV 按专注与分心区间导出 |
@@ -75,6 +76,12 @@
 例如，专注 20 分钟、分心 5 分钟、再专注 15 分钟，原任务有效时长为 35 分钟。明细保留一条任务汇总，通过分段明细查看各区间。专注事项与标签统一修改，分心事项与标签分别修改；各段时间可独立修改，但不能重叠或逆序。删除任务同时删除全部区间。
 
 完整规则见[分心与任务恢复](docs/distraction-and-resume.md)。
+
+### 记录期间修改事项与标签
+
+计时期间点击事项右侧的“修改”，调整名称或选择已有标签／“无标签”，再点击“保存”。表单打开期间继续计时，取消不改变记录。专注阶段的更正应用于本次任务全部专注区间；分心阶段只更正当前分心，恢复后保留原任务及标签。
+
+其他设备修改、结束或切换阶段后，表单保留草稿并提示核对，旧表单不能覆盖最新状态。Android 屏幕旋转保留草稿；取消或完全退出丢弃未保存输入。新增与删除标签、账本管理和导入导出仍限非记录状态。完整规则及模块职责见[活动编辑说明](docs/active-task-editing.md)。
 
 ### 配置同步与切换账户
 
@@ -161,6 +168,8 @@ sudo -u lyushi /opt/lyushi/lyushi-server --db /var/lib/lyushi/sync.sqlite \
 `deploy/upgrade-multiuser.sh` 是从协议 3 单用户服务进行**空白初始化**的一次性脚本：先保留回退备份，随后清空旧业务数据和设备密钥，创建空白管理员并配置网页入口。需要保留历史记录时，应先从旧客户端导出 JSON，升级后按用户导入。脚本会拒绝对已初始化的协议 4 服务重复清空。
 
 已运行多用户服务的常规更新使用 `deploy/upgrade-server.sh`，不会重新初始化账户。升级前生成包含全部用户数据库的完整 ZIP 备份，更新后核对身份、设备归属及历史，失败回退程序。
+
+0.7.0 的记录期间编辑保持协议 4 与备份格式 3，兼容现有 0.6.0 服务端。升级客户端即可使用，不要求更换服务器程序、迁移数据或重置设备密钥。
 
 ## 同步、备份与恢复
 
@@ -265,6 +274,7 @@ go test ./...
 
 ```bash
 QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --self-test "$(mktemp -d)"
+QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --active-editor-test "$(mktemp -d)"
 ```
 
 Windows 本机双客户端联测需先构建 `build/desktop-windows/lyushi.exe` 与 `build/lyushi-server.exe`，再运行：
@@ -274,6 +284,8 @@ Windows 本机双客户端联测需先构建 `build/desktop-windows/lyushi.exe` 
 ```
 
 该脚本使用随机回环端口、独立测试数据库和临时测试密钥，不访问线上服务器。Android 检查使用调试 APK，可通过 `scripts/check-android.ps1 -Serial <adb设备编号> -AndroidSdk <SDK路径>` 执行；仅在已授权的测试设备上运行。
+
+Android 编辑表单与旋转恢复使用 `scripts/test-active-editor-android.ps1 -Serial <adb设备编号> -AndroidSdk <SDK路径>` 验证，使用单独偏好及数据库，不读取日常账户密钥。
 
 ## 常见问题
 

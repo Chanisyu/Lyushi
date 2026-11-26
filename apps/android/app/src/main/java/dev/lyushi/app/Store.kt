@@ -149,6 +149,25 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
         record.put("segments", JSONArray(parts + JSONObject().put("kind", "focus").put("started", now).put("ended", JSONObject.NULL)))
         validateTransition(record); save("record", record)
     }
+    /**
+     * 仅更正当前阶段元数据；专注修改根事项，分心修改最后一段的独立快照。
+     * 编号与版本必须同时匹配，结束、阶段切换或远端修改后均拒绝旧表单。
+     * 不读取当前时间，不改区间和账本；校验失败回滚实体与队列，无变化不产生版本。
+     */
+    fun editActiveMetadata(id: String, expectedVersion: String, task: String, tag: String) = transaction {
+        val record = active()
+        check(id.isNotEmpty() && expectedVersion.isNotEmpty() && record?.optString("id") == id && record.optString("version") == expectedVersion) {
+            "任务状态已更新，输入已保留。请核对主页面，取消后重新打开修改"
+        }
+        val before = canonical(record!!)
+        val parts = taskSegments(record); val distracted = isDistracted(record)
+        val target = if (distracted) parts.last() else record
+        check(tag.isEmpty() || target.optString("tag") == tag || entities("tag").any { it.getString("name") == tag }) { "标签已被删除，请重新选择；输入已保留" }
+        target.put("task", task.trim()); if (tag.isEmpty()) target.remove("tag") else target.put("tag", tag)
+        if (distracted) record.put("segments", JSONArray(parts))
+        validateTransition(record)
+        if (canonical(record) != before) save("record", record)
+    }
     /** 为结束字段及版本外壳预留空间，分心过多时仍允许结束整个任务。 */
     private fun validateTransition(record: JSONObject) {
         check(taskPayloadSize(record) <= 500 * 1024) { "任务分段数据已达上限，请结束后新建任务" }
