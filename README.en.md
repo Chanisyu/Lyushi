@@ -28,13 +28,13 @@ The project's source and documentation use [Apache-2.0](LICENSE). Third-party co
 
 [Published releases](https://github.com/Chanisyu/Lyushi/releases) · [Changelog](CHANGELOG.md) · [简体中文](README.md)
 
-The current source version is **0.8.0**, requiring synchronization protocol **4**. Published 0.4.0 packages do not contain distractions, multi-user functionality or active-task editing and cannot connect to a protocol 4 service. Build the current source to obtain:
+The current source version is **0.8.1**, requiring synchronization protocol **4**. Published 0.4.0 packages do not contain distractions, multi-user functionality or active-task editing and cannot connect to a protocol 4 service. Build the current source to obtain:
 
 | Platform | Artifact |
 | --- | --- |
-| Windows 11 x64 | `lyushi-windows-0.8.0-beta.zip`; extract all files and run `Lyushi-0.8.0/lyushi.exe` |
-| Android | `lyushi-android-0.8.0-beta.apk`, currently debug-signed |
-| Ubuntu 26.04 LTS amd64 | `lyushi_0.8.0_amd64.deb`; install with `sudo apt install ./lyushi_0.8.0_amd64.deb` |
+| Windows 11 x64 | `lyushi-windows-0.8.1-beta.zip`; extract all files and run `Lyushi-0.8.1/lyushi.exe` |
+| Android | `lyushi-android-0.8.1-beta.apk`, currently debug-signed |
+| Ubuntu 26.04 LTS amd64 | `lyushi_0.8.1_amd64.deb`; install with `sudo apt install ./lyushi_0.8.1_amd64.deb` |
 | Linux amd64 server | `lyushi-server-linux-amd64`, deployed using `deploy/` |
 
 Build artifacts are placed in `dist/` and excluded from version control. Android requires API 26 or later; Android 17 is the current test environment. Export JSON before changing APK signing certificates or replacing application data.

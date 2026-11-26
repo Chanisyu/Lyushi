@@ -2,7 +2,8 @@
 <!-- HTTPS 同步只申请网络访问；不申请后台常驻或广泛文件权限，不允许明文公网连接。 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
-    <application android:label="柳时" android:allowBackup="false" android:supportsRtl="true" android:usesCleartextTraffic="false"
+    <application android:label="柳时" android:icon="@mipmap/lyushi_launcher" android:roundIcon="@mipmap/lyushi_launcher"
+        android:allowBackup="false" android:supportsRtl="true" android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>

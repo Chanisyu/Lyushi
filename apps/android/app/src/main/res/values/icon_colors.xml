@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 取共享图稿边缘的粉白色，使系统图标在遮罩或动画下呈现连贯底色。 -->
+    <color name="lyushi_icon_background">#FDF2F7</color>
+</resources>

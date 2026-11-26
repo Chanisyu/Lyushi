@@ -28,13 +28,13 @@
 
 [已发布版本](https://github.com/Chanisyu/Lyushi/releases) · [更新记录](CHANGELOG.md) · [English](README.en.md)
 
-当前源码版本为 **0.8.0**，同步协议为 **4**。已发布的 0.4.0 安装包不包含分心、多用户及记录期间编辑功能，也不能连接协议 4 服务端。0.8.0 可按下文从源码构建，生成文件如下：
+当前源码版本为 **0.8.1**，同步协议为 **4**。已发布的 0.4.0 安装包不包含分心、多用户及记录期间编辑功能，也不能连接协议 4 服务端。0.8.1 可按下文从源码构建，生成文件如下：
 
 | 平台 | 文件 | 使用方式 |
 | --- | --- | --- |
-| Windows 11 x64 | `lyushi-windows-0.8.0-beta.zip` | 完整解压，运行 `Lyushi-0.8.0/lyushi.exe`，保留同目录运行库 |
-| Android | `lyushi-android-0.8.0-beta.apk` | 在系统文件管理器安装；当前采用调试签名 |
-| Ubuntu 26.04 LTS amd64 | `lyushi_0.8.0_amd64.deb` | 执行 `sudo apt install ./lyushi_0.8.0_amd64.deb` |
+| Windows 11 x64 | `lyushi-windows-0.8.1-beta.zip` | 完整解压，运行 `Lyushi-0.8.1/lyushi.exe`，保留同目录运行库 |
+| Android | `lyushi-android-0.8.1-beta.apk` | 在系统文件管理器安装；当前采用调试签名 |
+| Ubuntu 26.04 LTS amd64 | `lyushi_0.8.1_amd64.deb` | 执行 `sudo apt install ./lyushi_0.8.1_amd64.deb` |
 | Linux amd64 服务端 | `lyushi-server-linux-amd64` | 配合 `deploy/` 中的 systemd 与 Caddy 配置部署 |
 
 构建产物位于 `dist/`，不纳入源码版本控制。Android 最低要求为 Android 8.0（API 26），当前验证环境为 Android 17。不同签名的 APK 通常不能直接覆盖安装；迁移前应导出 JSON 备份。桌面数据与程序文件分别保存，替换安装包不应覆盖数据目录。

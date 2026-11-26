@@ -447,7 +447,12 @@ static void selfTest(Store &store, const QString &directory)
 
 int main(int argc, char **argv)
 {
-    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.8.0");
+    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.8.1");
+    // 所有 Qt 窗口继承内置图案，Linux 桌面使用相同标识关联 lyushi.desktop。
+    app.setWindowIcon(QIcon(QStringLiteral(":/branding/lyushi_icon.png")));
+#ifdef Q_OS_LINUX
+    app.setDesktopFileName(QStringLiteral("lyushi"));
+#endif
     QLocale::setDefault(QLocale(QLocale::Chinese, QLocale::China));
     SimplifiedChineseTranslator translator; app.installTranslator(&translator);
     // 命令行检查和截图的设置也使用隔离目录，不覆盖日常使用时选择的账本或主题。

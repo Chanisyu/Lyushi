@@ -7,8 +7,10 @@ android {
         applicationId = "dev.lyushi.app"
         minSdk = 26
         targetSdk = 37
-        versionCode = 9
-        versionName = "0.8.0"
+        versionCode = 10
+        versionName = "0.8.1"
     }
+    // Android 和桌面从同一份 PNG 读取粉白 Ly 图案，避免各平台图标更新遗漏。
+    sourceSets.named("main") { res.directories.add(rootProject.file("../../assets/branding/res").absolutePath) }
     buildFeatures { buildConfig = true }
 }

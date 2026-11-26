@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 在 108 dp 图层内按比例收进图案，确保圆形和圆角遮罩下仍能看到 y 的末笔。 -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/lyushi_icon"
+    android:inset="13%" />

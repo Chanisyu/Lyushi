@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=柳时
+Comment=个人时间账本
+Exec=lyushi
+Icon=lyushi
+StartupWMClass=Lyushi
+Type=Application
+Terminal=false
+Categories=Utility;
