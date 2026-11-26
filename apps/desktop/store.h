@@ -55,6 +55,17 @@ public:
     QJsonObject syncRequest() const;
     bool acceptSync(const QJsonObject &response, const QJsonArray &sent);
     int pendingCount() const;
+    // 饮水与时间账本共用账户存储，独立提交和同步，计时期间可用。
+    QJsonObject waterView() const;
+    void waterSubmit(QJsonObject command);
+    QJsonObject waterRequest(const QString &serverId) const;
+    bool waterAccept(const QString &serverId, const QJsonObject &reply);
+    QJsonObject waterBackup() const;
+    void waterImport(const QJsonObject &backup);
+private:
+    QJsonObject waterData() const;
+    bool waterIsBound() const;
+    void saveWater(const QJsonObject &data);
 };
 
 /** 对失败统一抛出 UTF-8 错误，调用方必须明确告知用户。 */

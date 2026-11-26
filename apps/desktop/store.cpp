@@ -93,6 +93,7 @@ void Store::openDirectory(const QString &directory)
         "CREATE TABLE IF NOT EXISTS conflicts(id TEXT PRIMARY KEY,kind TEXT NOT NULL,entity_id TEXT NOT NULL,payload TEXT NOT NULL)",
         "DROP INDEX IF EXISTS one_active",
         "CREATE INDEX IF NOT EXISTS active_records ON entities(json_extract(payload,'$.started')) WHERE kind='record' AND json_extract(payload,'$.deleted')=0 AND json_extract(payload,'$.ended') IS NULL",
+        "CREATE TABLE IF NOT EXISTS water_local(singleton INTEGER PRIMARY KEY CHECK(singleton=1),payload TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS sync_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS sync_awaiting(version TEXT PRIMARY KEY,kind TEXT NOT NULL,id TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS sync_heads(kind TEXT NOT NULL,id TEXT NOT NULL,version TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(kind,id,version))"}) {

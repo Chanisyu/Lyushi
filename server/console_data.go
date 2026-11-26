@@ -28,6 +28,7 @@ type WebCommand struct {
 	Enabled      *bool          `json:"enabled"`
 	Entity       map[string]any `json:"entity"`
 	Backup       map[string]any `json:"backup"`
+	Water        *waterCommand  `json:"water"`
 }
 
 // 只读列表确定一个展示分支，其他分支仍可在冲突页查看，绝不按时间戳强行覆盖。

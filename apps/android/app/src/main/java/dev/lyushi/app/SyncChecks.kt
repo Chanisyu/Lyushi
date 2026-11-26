@@ -19,6 +19,7 @@ internal fun runSyncChecks(context: Context): JSONObject {
     }
     runFocusChecks(context)
     runActiveMetadataChecks(context)
+    runWaterChecks(context)
     context.deleteDatabase("protocol-check.sqlite")
     return Store(context,"protocol-check.sqlite").use { store ->
         var sequence = 0L
@@ -108,6 +109,6 @@ internal fun runSyncChecks(context: Context): JSONObject {
             val request = batch.syncRequest(); val count = request.getJSONArray("operations").length()
             check(count in 1..49 && canonical(request).toByteArray(Charsets.UTF_8).size < 2*1024*1024)
         }
-        JSONObject().put("passed",true).put("appVersion",BuildConfig.VERSION_NAME).put("versionCode",BuildConfig.VERSION_CODE).put("checks",JSONArray(listOf("unchanged poll","remote stop","concurrent branches","stale edit protection","pagination protection","known-branch delete","backup quarantine","transaction rollback","server identity","unknown field rejection","bounded batches","tag lifecycle and backup compatibility","distraction transitions, restart, effective duration, segment editing and backup","active metadata scope, stale guards, no-op, tag deletion, restart and rollback")))
+        JSONObject().put("passed",true).put("appVersion",BuildConfig.VERSION_NAME).put("versionCode",BuildConfig.VERSION_CODE).put("checks",JSONArray(listOf("unchanged poll","remote stop","concurrent branches","stale edit protection","pagination protection","known-branch delete","backup quarantine","transaction rollback","server identity","unknown field rejection","bounded batches","tag lifecycle and backup compatibility","distraction transitions, restart, effective duration, segment editing and backup","active metadata scope, stale guards, no-op, tag deletion, restart and rollback","water direction, timer isolation, correction, undo, backup and replica paging")))
     }
 }

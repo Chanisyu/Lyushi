@@ -28,13 +28,13 @@
 
 [已发布版本](https://github.com/Chanisyu/Lyushi/releases) · [更新记录](CHANGELOG.md) · [English](README.en.md)
 
-当前源码版本为 **0.7.0**，同步协议为 **4**。已发布的 0.4.0 安装包不包含分心、多用户及记录期间编辑功能，也不能连接协议 4 服务端。0.7.0 可按下文从源码构建，生成文件如下：
+当前源码版本为 **0.8.0**，同步协议为 **4**。已发布的 0.4.0 安装包不包含分心、多用户及记录期间编辑功能，也不能连接协议 4 服务端。0.8.0 可按下文从源码构建，生成文件如下：
 
 | 平台 | 文件 | 使用方式 |
 | --- | --- | --- |
-| Windows 11 x64 | `lyushi-windows-0.7.0-beta.zip` | 完整解压，运行 `Lyushi-0.7.0/lyushi.exe`，保留同目录运行库 |
-| Android | `lyushi-android-0.7.0-beta.apk` | 在系统文件管理器安装；当前采用调试签名 |
-| Ubuntu 26.04 LTS amd64 | `lyushi_0.7.0_amd64.deb` | 执行 `sudo apt install ./lyushi_0.7.0_amd64.deb` |
+| Windows 11 x64 | `lyushi-windows-0.8.0-beta.zip` | 完整解压，运行 `Lyushi-0.8.0/lyushi.exe`，保留同目录运行库 |
+| Android | `lyushi-android-0.8.0-beta.apk` | 在系统文件管理器安装；当前采用调试签名 |
+| Ubuntu 26.04 LTS amd64 | `lyushi_0.8.0_amd64.deb` | 执行 `sudo apt install ./lyushi_0.8.0_amd64.deb` |
 | Linux amd64 服务端 | `lyushi-server-linux-amd64` | 配合 `deploy/` 中的 systemd 与 Caddy 配置部署 |
 
 构建产物位于 `dist/`，不纳入源码版本控制。Android 最低要求为 Android 8.0（API 26），当前验证环境为 Android 17。不同签名的 APK 通常不能直接覆盖安装；迁移前应导出 JSON 备份。桌面数据与程序文件分别保存，替换安装包不应覆盖数据目录。
@@ -48,6 +48,7 @@
 | 开始与结束 | 保存实际起止时刻并显示读秒，关闭应用不自动结束记录 |
 | 记录期间编辑 | 保存当前事项名称与标签，计时继续，任务身份与时间边界保持不变 |
 | 分心与恢复 | 临时记录其他事项，一键恢复原任务及标签，分心不计入有效时长 |
+| 饮水记录 | 可设容量的水壶、拖动水位、按日统计、跨设备同步及网页历史管理 |
 | 明细管理 | 补记、修改已结束任务、编辑分段起止时间及删除整条任务 |
 | 备份与表格 | JSON 合并恢复并保留不同版本；CSV 按专注与分心区间导出 |
 | 多用户同步 | 每位用户独立账本、标签、记录、版本历史、设备和同步游标 |
@@ -65,7 +66,7 @@
 2. 点击“开始记录”，应用立即保存开始时刻。
 3. 点击“结束记录”，保存结束时刻并进入账本明细。
 
-记录期间不能切换账本、切换账户、查看账本明细或导入导出。关闭应用、退出窗口及设备重启均不会自动结束记录。
+记录期间不能切换账本、切换账户、查看账本明细或导入导出时间账本。关闭应用、退出窗口及设备重启均不会自动结束记录。
 
 ### 分心与任务恢复
 
@@ -82,6 +83,12 @@
 计时期间点击事项右侧的“修改”，调整名称或选择已有标签／“无标签”，再点击“保存”。表单打开期间继续计时，取消不改变记录。专注阶段的更正应用于本次任务全部专注区间；分心阶段只更正当前分心，恢复后保留原任务及标签。
 
 其他设备修改、结束或切换阶段后，表单保留草稿并提示核对，旧表单不能覆盖最新状态。Android 屏幕旋转保留草稿；取消或完全退出丢弃未保存输入。新增与删除标签、账本管理和导入导出仍限非记录状态。完整规则及模块职责见[活动编辑说明](docs/active-task-editing.md)。
+
+### 饮水记录
+
+在主窗口点击“饮水记录”。设置容量后，选择“加水”“喝水”或“倒水”，拖动蓝色水位线并确认。只有喝水与补记计入北京时间的当日统计。水壶操作、历史更正及饮水导出可在任务计时期间进行。
+
+饮水窗口提供按日历史、撤销、校准水位及独立 JSON 合并恢复和 CSV 导出。已连接账户在断网时可本地记录，冲突水位操作留待核对。网页后台支持按账户查看、补记、更正和作废。详见[饮水记录](docs/water-tracking.md)。
 
 ### 配置同步与切换账户
 
@@ -169,7 +176,9 @@ sudo -u lyushi /opt/lyushi/lyushi-server --db /var/lib/lyushi/sync.sqlite \
 
 已运行多用户服务的常规更新使用 `deploy/upgrade-server.sh`，不会重新初始化账户。升级前生成包含全部用户数据库的完整 ZIP 备份，更新后核对身份、设备归属及历史，失败回退程序。
 
-0.7.0 的记录期间编辑保持协议 4 与备份格式 3，兼容现有 0.6.0 服务端。升级客户端即可使用，不要求更换服务器程序、迁移数据或重置设备密钥。
+### 启用 0.8.0 饮水同步
+
+使用 `deploy/upgrade-server.sh` 对现有协议 4 服务进行常规升级。健康检查返回 `waterProtocol=1` 表示可同步饮水。0.8.0 起的客户端复用原账户地址和设备密钥。原同步协议及时间账本备份格式保持兼容，服务端的完整 ZIP 同时保留饮水数据。
 
 ## 同步、备份与恢复
 
@@ -197,6 +206,7 @@ sudo -u lyushi /opt/lyushi/lyushi-server --db /var/lib/lyushi/sync.sqlite \
 | 本地存储与同步 | `Store`、`SyncStore`、`SyncClient`，事务、待同步队列、身份绑定、分页及冲突 |
 | 账户目录 | `server/accounts.go`，用户、设备、密码、状态及每用户 SQLite 归属 |
 | 网页认证 | `server/accounts_http.go`，会话、同源与 CSRF 校验、登录限制、权限检查 |
+| 饮水记录 | 三端水壶控件、离线存储与独立同步，`server/water.go` 提供按账户事务与网页历史接口 |
 | 业务管理与备份 | `console_data.go`、`console_backup.go`、`catalog_backup.go`，网页操作、用户导入导出及完整备份 |
 | 同步版本与分段 | `server/main.go`、`focus.go`，不可变版本、增量同步及时间线校验 |
 | 网页资源 | `server/web/`，简体中文轻量界面、分页、表单及响应式布局 |
@@ -275,6 +285,7 @@ go test ./...
 ```bash
 QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --self-test "$(mktemp -d)"
 QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --active-editor-test "$(mktemp -d)"
+QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --water-self-test "$(mktemp -d)"
 ```
 
 Windows 本机双客户端联测需先构建 `build/desktop-windows/lyushi.exe` 与 `build/lyushi-server.exe`，再运行：

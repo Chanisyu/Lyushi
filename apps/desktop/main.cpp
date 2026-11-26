@@ -7,6 +7,7 @@
 #include "syncclient.h"
 #include "profiles.h"
 #include "ui-language.h"
+#include "waterui.h"
 #include <QtWidgets>
 #include <QJsonDocument>
 #include <QSaveFile>
@@ -43,8 +44,13 @@ static void closeManagementDialogs(QWidget *owner)
     // 独立窗口不保证被 isAncestorOf 或 activeModalWidget 识别，使用 QObject 归属树。
     QList<QPointer<QDialog>> dialogs;
     for (auto *dialog : owner->findChildren<QDialog *>()) dialogs.append(dialog);
-    for (auto it = dialogs.crbegin(); it != dialogs.crend(); ++it)
-        if (*it && (*it)->isVisible() && !(*it)->property("activeMetadataDraft").toBool()) (*it)->reject();
+    for (auto it = dialogs.crbegin(); it != dialogs.crend(); ++it) {
+        if (!*it || !(*it)->isVisible() || (*it)->property("activeMetadataDraft").toBool()) continue;
+        // 饮水窗口及其子表单不属于受计时锁定的账本管理页面。
+        bool water = false;
+        for (QObject *parent = it->data(); parent; parent = parent->parent()) if (parent->property("waterIndependent").toBool()) { water = true; break; }
+        if (!water) (*it)->reject();
+    }
 }
 /** 使用系统色彩提示切换三种模式，避免把本机外观同步给其他设备。 */
 static void applyTheme()
@@ -272,6 +278,9 @@ public:
         auto *header = new QHBoxLayout; auto *title = new QLabel(QStringLiteral("柳时")); title->setStyleSheet("font-size:26px;font-weight:600"); header->addWidget(title); header->addStretch();
         auto *syncButton = new QPushButton(QStringLiteral("同步")); header->addWidget(syncButton);
         auto *settingsButton = new QPushButton(QStringLiteral("设置")); header->addWidget(settingsButton); layout->addLayout(header);
+        auto *waterButton = new QPushButton(QStringLiteral("饮水记录")); layout->addWidget(waterButton);
+        connect(waterButton,&QPushButton::clicked,this,[this] { safely(this,[this] { showWater(this,store,sync); }); });
+        if (configureNetwork) sync.waterUpdated = [] {};
         clock = new QLabel; layout->addWidget(clock); auto *ledgerRow = new QHBoxLayout;
         ledgers = new QComboBox; ledgers->setPlaceholderText(QStringLiteral("请先新建时间账本")); ledgers->setMinimumContentsLength(12); ledgerRow->addWidget(ledgers, 1);
         add = new QPushButton(QStringLiteral("新建账本")); ledgerRow->addWidget(add); layout->addLayout(ledgerRow);
@@ -438,7 +447,7 @@ static void selfTest(Store &store, const QString &directory)
 
 int main(int argc, char **argv)
 {
-    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.7.0");
+    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.8.0");
     QLocale::setDefault(QLocale(QLocale::Chinese, QLocale::China));
     SimplifiedChineseTranslator translator; app.installTranslator(&translator);
     // 命令行检查和截图的设置也使用隔离目录，不覆盖日常使用时选择的账本或主题。
@@ -460,6 +469,7 @@ int main(int argc, char **argv)
         QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)); QLockFile lock(mode.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/application.lock" : QDir(directory).filePath("instance.lock")); QDir().mkpath(directory);
         ensure(lock.tryLock(0), QStringLiteral("此数据目录已由另一个柳时进程打开")); Store store(directory);
         if (mode == "--self-test") { selfTest(store, directory); puts("PASS: ledgers, active lock, import validation/rollback/conflicts, tombstones, CSV, bounded batches"); return 0; }
+        if (mode == "--water-self-test") { waterSelfTest(store,args.value(3)); puts("PASS: water controls, timer isolation, validation, undo and backup"); return 0; }
         if (mode == "--active-editor-test") {
             // 窗口自检的账本选择也隔离到测试目录，避免改变日常 QSettings。
             QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory+"/settings");
@@ -505,9 +515,20 @@ int main(int argc, char **argv)
             else if (action == "finish") store.finish(command["now"].toInteger(QDateTime::currentMSecsSinceEpoch()));
             else ensure(false, "unsupported command"); return 0;
         }
-        if (mode == "--sync-once") {
+        // 独立验收读取专用目录，通过正式存储与网络入口执行操作。
+        if (mode == "--water-inspect") { writeFile(args.value(3),QJsonDocument(store.waterView()).toJson()); return 0; }
+        if (mode == "--water-export") { writeFile(args.value(3),QJsonDocument(store.waterBackup()).toJson()); return 0; }
+        if (mode == "--water-command" || mode == "--water-import") {
+            QFile input(args.value(3)); ensure(input.open(QIODevice::ReadOnly) && input.size() <= 32*1024*1024,"invalid water command file");
+            const auto doc = QJsonDocument::fromJson(input.readAll()); ensure(doc.isObject(),"invalid water JSON");
+            if (mode == "--water-import") store.waterImport(doc.object()); else store.waterSubmit(doc.object());
+            return 0;
+        }
+        if (mode == "--sync-once" || mode == "--water-sync-once") {
             QFile file(args.value(4)); ensure(file.open(QIODevice::ReadOnly) && file.size() <= 256, "cannot read test device key");
-            SyncClient sync(store); sync.settled = [&](bool success) { puts(sync.status.toUtf8().constData()); app.exit(success ? 0 : 1); };
+            SyncClient sync(store);
+            if (mode == "--water-sync-once") sync.waterSettled = [&](bool success) { puts(sync.waterStatus.toUtf8().constData()); app.exit(success ? 0 : 1); };
+            else sync.settled = [&](bool success) { puts(sync.status.toUtf8().constData()); app.exit(success ? 0 : 1); };
             QTimer::singleShot(0, [&] { try { sync.configure(args.value(3), QString::fromUtf8(file.readAll()).trimmed(), true); } catch (...) { app.exit(1); } });
             QTimer::singleShot(60000, [&] { app.exit(2); }); return app.exec();
         }

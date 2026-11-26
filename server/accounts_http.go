@@ -220,7 +220,7 @@ func (s *Service) deviceEndpoint(w http.ResponseWriter, r *http.Request) {
 func (s *Service) accountHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		jsonReply(w, 200, map[string]any{"status": "ok", "protocol": 4, "minimumClient": "0.6.0"})
+		jsonReply(w, 200, map[string]any{"status": "ok", "protocol": 4, "minimumClient": "0.6.0", "waterProtocol": 1})
 	})
 	slots := make(chan struct{}, 8)
 	endpoint := func(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +234,15 @@ func (s *Service) accountHandler() http.Handler {
 	}
 	mux.HandleFunc("GET /v1/device", endpoint)
 	mux.HandleFunc("POST /v1/sync", endpoint)
+	mux.HandleFunc("POST /v1/water", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+			s.waterDevice(w, r)
+		default:
+			apiError(w, 503, "busy")
+		}
+	})
 	mux.HandleFunc("POST /console/api/login", s.login)
 	mux.HandleFunc("GET /console/api/me", func(w http.ResponseWriter, r *http.Request) {
 		s.catalog.gate.Lock()
@@ -313,6 +322,14 @@ func (s *Service) consoleAPI(w http.ResponseWriter, r *http.Request) {
 		s.webUsers(w)
 	case r.Method == http.MethodGet && r.URL.Path == "/console/api/state":
 		s.webState(w, r, target)
+	case r.Method == http.MethodGet && r.URL.Path == "/console/api/water":
+		s.waterWebHistory(w, r, target)
+	case r.Method == http.MethodPost && r.URL.Path == "/console/api/water":
+		if err := s.waterWebAction(r, actor, target, command); err != nil {
+			apiError(w, 409, err.Error())
+			return
+		}
+		jsonReply(w, 200, map[string]bool{"ok": true})
 	case r.Method == http.MethodGet && r.URL.Path == "/console/api/export":
 		s.webExport(w, r, target)
 	case r.Method == http.MethodGet && r.URL.Path == "/console/api/audit":

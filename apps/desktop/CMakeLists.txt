@@ -1,10 +1,10 @@
 # 桌面应用只使用系统窗口与 SQLite；Windows 和 Ubuntu 共用此构建入口。
 cmake_minimum_required(VERSION 3.22)
-project(Lyushi VERSION 0.7.0 LANGUAGES CXX)
+project(Lyushi VERSION 0.8.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Sql Network)
-qt_add_executable(lyushi WIN32 main.cpp profiles.cpp store.cpp focus.cpp focuschecks.cpp activemetadata-checks.cpp syncstore.cpp syncclient.cpp)
+qt_add_executable(lyushi WIN32 main.cpp profiles.cpp store.cpp focus.cpp focuschecks.cpp activemetadata-checks.cpp syncstore.cpp syncclient.cpp water.cpp waterui.cpp)
 target_link_libraries(lyushi PRIVATE Qt6::Widgets Qt6::Sql Qt6::Network)
 if(WIN32)
     # DPAPI 由 Windows 提供，不在设置文件中存放明文设备密钥。

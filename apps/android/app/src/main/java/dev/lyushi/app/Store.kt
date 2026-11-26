@@ -39,6 +39,8 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         check(oldVersion == 1 && newVersion == 2) { "不支持的数据库升级" }; initializeSync(db, true)
     }
+    /** 饮水仅增加独立表，原版本仍能读取本机时间账本。 */
+    override fun onOpen(db: SQLiteDatabase) { super.onOpen(db); initializeWater(db) }
     /** 数据库事务提交失败时抛错，结束事务会回滚未标记成功的全部修改。 */
     internal fun <T> transaction(action: () -> T): T {
         val db = writableDatabase

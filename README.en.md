@@ -28,13 +28,13 @@ The project's source and documentation use [Apache-2.0](LICENSE). Third-party co
 
 [Published releases](https://github.com/Chanisyu/Lyushi/releases) · [Changelog](CHANGELOG.md) · [简体中文](README.md)
 
-The current source version is **0.7.0**, requiring synchronization protocol **4**. Published 0.4.0 packages do not contain distractions, multi-user functionality or active-task editing and cannot connect to a protocol 4 service. Build the current source to obtain:
+The current source version is **0.8.0**, requiring synchronization protocol **4**. Published 0.4.0 packages do not contain distractions, multi-user functionality or active-task editing and cannot connect to a protocol 4 service. Build the current source to obtain:
 
 | Platform | Artifact |
 | --- | --- |
-| Windows 11 x64 | `lyushi-windows-0.7.0-beta.zip`; extract all files and run `Lyushi-0.7.0/lyushi.exe` |
-| Android | `lyushi-android-0.7.0-beta.apk`, currently debug-signed |
-| Ubuntu 26.04 LTS amd64 | `lyushi_0.7.0_amd64.deb`; install with `sudo apt install ./lyushi_0.7.0_amd64.deb` |
+| Windows 11 x64 | `lyushi-windows-0.8.0-beta.zip`; extract all files and run `Lyushi-0.8.0/lyushi.exe` |
+| Android | `lyushi-android-0.8.0-beta.apk`, currently debug-signed |
+| Ubuntu 26.04 LTS amd64 | `lyushi_0.8.0_amd64.deb`; install with `sudo apt install ./lyushi_0.8.0_amd64.deb` |
 | Linux amd64 server | `lyushi-server-linux-amd64`, deployed using `deploy/` |
 
 Build artifacts are placed in `dist/` and excluded from version control. Android requires API 26 or later; Android 17 is the current test environment. Export JSON before changing APK signing certificates or replacing application data.
@@ -204,6 +204,12 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o ../build/lyushi-serv
 
 Windows developers can set the same environment variables in PowerShell before running `go build`. `scripts/package-server.ps1 -GoExecutable <path-to-go.exe>` collects Go dependency licenses and packages an existing Linux server build. Generate `build/lyushi-server-linux-amd64` before running it.
 
+## Water tracking
+
+Open **饮水记录** (Water tracking) from the main window during or between tasks. Set the bottle capacity, select refill, drink or pour, drag the blue waterline, and confirm. The preview shows the volume change and projected remaining volume. Drinking and manual additions count toward the daily total in Beijing time.
+
+The native clients support calibration, undo, daily history, corrections, voids, JSON merge and CSV export. A stale offline water level enters review and may be recorded as historical intake after confirmation. The web console provides daily history and authorized account-level corrections. Version 0.8.0 introduces an independent water endpoint enabled by the corresponding server update. Time tracking continues to use protocol 4. See the [water tracking guide](docs/water-tracking.md) in Chinese.
+
 ## Running tests
 
 The project includes server unit tests, desktop storage and recovery self-tests, local synchronization tests with two clients, and Android storage-protocol checks. Run tests with isolated databases and dedicated test devices.
@@ -222,6 +228,7 @@ Isolated desktop self-test on Linux:
 ```bash
 QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --self-test "$(mktemp -d)"
 QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --active-editor-test "$(mktemp -d)"
+QT_QPA_PLATFORM=offscreen ./build/desktop-linux/lyushi --water-self-test "$(mktemp -d)"
 ```
 
 For local Windows integration testing, first build `build/desktop-windows/lyushi.exe` and `build/lyushi-server.exe`, then run:

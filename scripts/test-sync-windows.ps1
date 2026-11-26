@@ -43,6 +43,18 @@ function Apply-ActiveEdit([string]$directory,$record,[string]$task) {
     @{action='edit-active';id=$record.id;expectedVersion=$record.version;task=$task;tag=''} | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding UTF8
     Invoke-Client '--command' $directory @($path)
 }
+# 与时间账本共用账户，但饮水使用独立游标和待同步命令。
+function Submit-Water([string]$directory,$command) {
+    $path = Join-Path $sandbox 'water-command.json'
+    $command | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding UTF8
+    Invoke-Client '--water-command' $directory @($path)
+}
+function Inspect-Water([string]$directory) {
+    $path = Join-Path $sandbox 'water-inspect.json'
+    Invoke-Client '--water-inspect' $directory @($path)
+    Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+}
+function Sync-Water([string]$directory) { Invoke-Client '--water-sync-once' $directory @($address,$keyFile) }
 try {
     $ready = $false
     for ($attempt=0;$attempt -lt 40;$attempt++) {
@@ -55,6 +67,22 @@ try {
     Invoke-Client '--sync-once' $two @($address,$keyFile)
     $second=Inspect-Client $two
     if (@($second.records).Count -ne 1 -or $null -ne $second.records[0].ended) { throw '另一客户端未收到进行中状态' }
+    Submit-Water $one @{kind='setup';capacity=750;ml=0}
+    $baseBottle=(Inspect-Water $one).bottle
+    Submit-Water $one @{kind='fill';base=$baseBottle.version;from=0;ml=600}
+    Sync-Water $one; Sync-Water $two
+    $baseBottle=(Inspect-Water $two).bottle
+    Submit-Water $one @{kind='drink';base=$baseBottle.version;from=600;ml=450}
+    Submit-Water $two @{kind='drink';base=$baseBottle.version;from=600;ml=400}
+    Sync-Water $one; Sync-Water $two
+    $water=Inspect-Water $two
+    if ($water.bottle.ml -ne 450 -or $water.conflicts.Count -ne 1 -or $water.entries.Count -ne 2) { throw '离线冲突重复扣减水位或饮水量' }
+    $conflictId = @($water.conflicts.Keys)[0]
+    Submit-Water $two @{kind='recover';target=$conflictId}
+    Sync-Water $two; Sync-Water $one
+    $water=Inspect-Water $one
+    if ($water.bottle.ml -ne 450 -or $water.conflicts.Count -ne 0 -or @($water.entries.Values | Where-Object {$_.kind -eq 'manual'}).ml -ne 200) { throw '核对补记未同步或改变现有水量' }
+    if ((Inspect-Client $one).records[0].version -ne $second.records[0].version) { throw '饮水改变当前计时记录' }
     # 活动改名不改变记录编号或开始边界；对端接收后继续同一个任务。
     Apply-ActiveEdit $one $second.records[0] '专注更正'
     Invoke-Client '--sync-once' $one @($address,$keyFile); Invoke-Client '--sync-once' $two @($address,$keyFile)
@@ -151,7 +179,7 @@ try {
     $delete=Join-Path $sandbox 'delete.json'; @{action='delete';id=$base.id}|ConvertTo-Json|Set-Content -LiteralPath $delete -Encoding UTF8
     Invoke-Client '--command' $one @($delete); Invoke-Client '--sync-once' $one @($address,$keyFile); Invoke-Client '--sync-once' $two @($address,$keyFile)
     if (-not ((Inspect-Client $two).records | Where-Object {$_.id -eq $base.id}).deleted) { throw '删除未传播' }
-    $summary=@{passed=$true;activeMetadata=$true;activeMetadataBranches=$true;tagLifecycle=$true;distractionCrossDevice=$true;crossDeviceStop=$true;offlineBranches=$true;paginationProtectsPending=$true;deletePropagation=$true;directory=$sandbox}
+    $summary=@{passed=$true;waterSyncAndConflicts=$true;activeMetadata=$true;activeMetadataBranches=$true;tagLifecycle=$true;distractionCrossDevice=$true;crossDeviceStop=$true;offlineBranches=$true;paginationProtectsPending=$true;deletePropagation=$true;directory=$sandbox}
     $summary|ConvertTo-Json|Set-Content -LiteralPath "$projectDirectory/build/sync-local-result.json" -Encoding UTF8
     $summary|ConvertTo-Json
 } finally {

@@ -43,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var sync: SyncClient
     private val dialogs = mutableListOf<AlertDialog>()
+    private var waterDialog: WaterDialog? = null
     private var activeEditor: AlertDialog? = null
     private var activeDraft: ActiveMetadataDraft? = null
     private var activeDraftName: EditText? = null
@@ -80,7 +81,7 @@ class MainActivity : Activity() {
             deleteDatabase("active-editor-ui-check.sqlite"); editorTestStage = 0
         }
         loadedProfile=activeProfile(preferences); store = Store(this, if (activeEditorUiTest) "active-editor-ui-check.sqlite" else accountDatabase(loadedProfile)); preferences.registerOnSharedPreferenceChangeListener(profileListener); selected = preferences.getString("ledger."+activeProfile(preferences), "") ?: ""; fileMode = savedInstanceState?.getInt("fileMode") ?: 0
-        sync = SyncClient(applicationContext, store, preferences, worker, handler) { changed, reconnected ->
+        sync = SyncClient(applicationContext, store, preferences, worker, handler, { if (!isDestroyed) safely { waterDialog?.refresh() } }) { changed, reconnected ->
             if (!isDestroyed) safely {
                 if (changed && !busy) {
                     applySynchronizedChange()
@@ -109,7 +110,7 @@ class MainActivity : Activity() {
     }
     override fun onDestroy() {
         preferences.unregisterOnSharedPreferenceChangeListener(profileListener)
-        sync.close(); dialogs.toList().forEach { it.dismiss() }
+        sync.close(); waterDialog?.dismiss(); dialogs.toList().forEach { it.dismiss() }
         // 排在全部文件操作之后关闭数据库，避免后台任务与页面销毁竞争句柄。
         worker.execute { store.close() }; worker.shutdown(); super.onDestroy()
     }
@@ -140,6 +141,7 @@ class MainActivity : Activity() {
     /** 同名账本的选择按编号保存，刷新页面不改变未结束记录所属账本。 */
     private fun showMain() {
         screen = "main"; page("柳时"); clock = label(""); root.addView(clock)
+        root.addView(button("饮水记录") { showWater() })
         val current = store.active(); if (current != null) selected = current.getString("ledgerId")
         val ledgers = store.entities("ledger")
         if (ledgers.none { it.getString("id") == selected }) selected = ledgers.firstOrNull()?.getString("id") ?: ""
@@ -203,6 +205,53 @@ class MainActivity : Activity() {
         root.addView(button("立即同步") { sync.request(true) })
         root.addView(button("查看保留的冲突版本") { showConflicts() }.also { locked.add(it) })
         status = label("", 13f); root.addView(status); render()
+    }
+    /** 与主计时窗口并行显示。远端开始记录时只关闭账本管理表单。 */
+    private fun showWater() {
+        if (waterDialog?.isShowing == true) return
+        val dialog = WaterDialog(this,store,sync,::chooseWaterFile)
+        waterDialog = dialog
+        dialog.setOnDismissListener { if (waterDialog === dialog) waterDialog = null }
+        dialog.show(); sync.request(true)
+    }
+
+    /** 饮水的文件选择与账本锁分开，使用单文件授权并在工作线程进行原子导入。 */
+    private fun chooseWaterFile(mode: Int) {
+        val importing = mode == 0
+        val csv = mode == 2
+        val intent = Intent(if (importing) Intent.ACTION_OPEN_DOCUMENT else Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = if (importing) "*/*" else if (csv) "text/csv" else "application/json"
+            if (!importing) putExtra(Intent.EXTRA_TITLE,if (csv) "饮水记录.csv" else "饮水备份.json")
+        }
+        startActivityForResult(intent,110+mode)
+    }
+
+    private fun transferWaterFile(mode: Int, uri: android.net.Uri) {
+        worker.execute {
+            val result = runCatching {
+                if (mode == 0) contentResolver.openInputStream(uri)!!.use { input ->
+                    val output = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val length = input.read(buffer)
+                        if (length < 0) break
+                        check(output.size()+length <= 32*1024*1024) { "饮水备份超过 32 MiB" }
+                        output.write(buffer,0,length)
+                    }
+                    store.waterImport(JSONObject(output.toString("UTF-8")))
+                    "饮水备份已合并"
+                } else {
+                    val content = if (mode == 1) store.waterBackup().toString(2) else store.waterCsv()
+                    contentResolver.openOutputStream(uri,"wt")!!.bufferedWriter(Charsets.UTF_8).use { it.write(content) }
+                    "饮水文件已保存"
+                }
+            }
+            runOnUiThread { if (!isDestroyed) {
+                Toast.makeText(this,result.getOrElse { it.message ?: "饮水文件处理失败" },Toast.LENGTH_LONG).show()
+                if (result.isSuccess) { safely { waterDialog?.refresh() }; sync.request(true) }
+            } }
+        }
     }
     /** 保存旋转前的最新输入；捕获本身没有任何数据库副作用。 */
     private fun captureActiveDraft(): ActiveMetadataDraft? = activeDraft?.also {
@@ -424,6 +473,10 @@ class MainActivity : Activity() {
     @Deprecated("系统文件选择器的兼容回调")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode in 110..112) {
+            if (resultCode == RESULT_OK) data?.data?.let { transferWaterFile(requestCode-110,it) }
+            return
+        }
         if (resultCode != RESULT_OK || data?.data == null) return
         val uri = data.data!!
         safely {

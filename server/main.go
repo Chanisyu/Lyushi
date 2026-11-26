@@ -101,6 +101,9 @@ func openService(path string) (*Service, error) {
 	if err := service.initCatalog(path); err != nil {
 		return fail(err)
 	}
+	if err := service.initWater(context.Background()); err != nil {
+		return fail(err)
+	}
 	return service, nil
 }
 

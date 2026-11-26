@@ -60,6 +60,10 @@ with tempfile.TemporaryDirectory(prefix='lyushi-upgrade-check-') as temporary:
             assert old.execute("SELECT value FROM meta WHERE key='serverId'").fetchone()==current.execute("SELECT value FROM meta WHERE key='serverId'").fetchone()
             for version,operation in old.execute('SELECT id,operation FROM versions'):
                 assert current.execute('SELECT operation FROM versions WHERE id=?',(version,)).fetchone()==(operation,)
+            # 饮水仍存于用户库。只验证升级前已存在的日志，不读取或打印内容。
+            if old.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='water_log'").fetchone():
+                for operation_id,command,change in old.execute('SELECT id,command,change FROM water_log'):
+                    assert current.execute('SELECT command,change FROM water_log WHERE id=?',(operation_id,)).fetchone()==(command,change)
             if name=='catalog.sqlite':
                 for user in old.execute('SELECT id,username,role FROM users'):
                     assert current.execute('SELECT username,role FROM users WHERE id=?',(user[0],)).fetchone()==user[1:]
@@ -68,8 +72,8 @@ with tempfile.TemporaryDirectory(prefix='lyushi-upgrade-check-') as temporary:
             old.close();current.close()
 with urlopen('http://127.0.0.1:8093/health',timeout=10) as response:
     health=json.load(response)
-assert health['protocol']==4 and health['minimumClient']=='0.6.0'
-print(json.dumps({'passed':True,'protocol':4,'allAccountDatabasesVerified':True,'identitiesAndDevicesPreserved':True}))
+assert health['protocol']==4 and health['minimumClient']=='0.6.0' and health['waterProtocol']==1
+print(json.dumps({'passed':True,'protocol':4,'waterProtocol':1,'allAccountDatabasesVerified':True,'identitiesAndDevicesPreserved':True}))
 PY
 trap - ERR
 systemctl is-active lyushi
