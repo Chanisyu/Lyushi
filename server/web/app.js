@@ -6,6 +6,7 @@ const emptyFilters=()=>({ledgerId:'',q:'',from:'',to:''});
 let filters=emptyFilters();
 let viewGeneration=0;
 let sessionGeneration=0;
+let loadingView=null,refreshingRecords=null,updateRecords=null;
 let waterDay='';
 const tabs={records:'账本记录',water:'饮水记录',tags:'标签',devices:'设备',users:'用户管理',audit:'操作日志',settings:'账户设置',conflicts:'冲突历史'};
 function el(tag,text='',cls=''){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n}
@@ -70,6 +71,7 @@ function useSession(result){sessionGeneration++;me=result.user;csrf=result.csrf;
 /** 登录表单只在内存读取密码，成功后立即清空输入。 */
 function renderLogin(){
  sessionGeneration++;viewGeneration++;me=null;csrf='';selected='';tab='records';page=0;view=null;users=[];waterDay='';filters=emptyFilters();
+ loadingView=null;updateRecords=null;
  document.querySelectorAll('dialog').forEach(d=>d.remove());app.replaceChildren();
  const notice=document.querySelector('#notice');clearTimeout(notice.timer);notice.textContent='';notice.style.display='none';
  const box=el('form','','login');box.append(el('div','柳时','brand'),el('p','管理后台','muted'));
@@ -110,24 +112,28 @@ async function load(overrides={}){
  const actorId=me.id,session=sessionGeneration,generation=++viewGeneration;
  const current=()=>generation===viewGeneration&&session===sessionGeneration;
  if(me.mustChangePassword){app.replaceChildren();const box=el('section','','login');box.append(el('div','柳时','brand'));passwordForm(box,true);app.append(box);return}
- const next={selected,tab,page,filters,waterDay,...overrides};
- let nextUsers=[],nextView=null;
- if(me.role==='admin'){
-  nextUsers=(await api('users')).users;
+ loadingView=generation;
+ try{
+  const next={selected,tab,page,filters,waterDay,...overrides};
+  let nextUsers=[],nextView=null;
+  if(me.role==='admin'){
+   nextUsers=(await api('users')).users;
+   if(!current())return;
+   if(!nextUsers.some(x=>x.user.id===next.selected))Object.assign(next,{selected:actorId,page:0,filters:emptyFilters(),waterDay:''});
+  }else next.selected=actorId;
+  if(next.tab==='water'){
+   nextView=await api('water?'+new URLSearchParams({userId:next.selected,day:next.waterDay,page:next.page}));
+  }else if(!['users','audit','settings'].includes(next.tab)){
+   const kind=next.tab==='tags'?'tag':next.tab==='conflicts'?'conflict':'record';
+   nextView=await accountState(next.selected,kind,next.page,next.filters);
+  }
   if(!current())return;
-  if(!nextUsers.some(x=>x.user.id===next.selected))Object.assign(next,{selected:actorId,page:0,filters:emptyFilters(),waterDay:''});
- }else next.selected=actorId;
- if(next.tab==='water'){
-  nextView=await api('water?'+new URLSearchParams({userId:next.selected,day:next.waterDay,page:next.page}));
- }else if(!['users','audit','settings'].includes(next.tab)){
-  const kind=next.tab==='tags'?'tag':next.tab==='conflicts'?'conflict':'record';
-  nextView=await api('state?'+new URLSearchParams({userId:next.selected,kind,page:next.page,...next.filters}));
- }
- if(!current())return;
- ({selected,tab,page,filters,waterDay}=next);
- users=nextUsers;view=nextView;
- renderShell();const content=document.querySelector('.content');if(tab==='records')renderRecords(content);else if(tab==='water')renderWater(content);else if(tab==='tags')renderTags(content);else if(tab==='devices')renderDevices(content);else if(tab==='users')renderUsers(content);else if(tab==='audit')await renderAudit(content);else if(tab==='conflicts')renderConflicts(content);else renderSettings(content)
+  ({selected,tab,page,filters,waterDay}=next);
+  users=nextUsers;view=nextView;updateRecords=null;
+  renderShell();const content=document.querySelector('.content');if(tab==='records')renderRecords(content);else if(tab==='water')renderWater(content);else if(tab==='tags')renderTags(content);else if(tab==='devices')renderDevices(content);else if(tab==='users')renderUsers(content);else if(tab==='audit')await renderAudit(content);else if(tab==='conflicts')renderConflicts(content);else renderSettings(content)
+ }finally{if(loadingView===generation)loadingView=null}
 }
+function accountState(userId,kind,page,filters){return api('state?'+new URLSearchParams({userId,kind,page,...filters}))}
 function openAccount(userId,nextTab=tab){return load({selected:userId,tab:nextTab,page:0,filters:emptyFilters(),waterDay:''})}
 /** 管理员可切换查看目标账户，普通用户仅显示自己的空间。 */
 function renderShell(){
@@ -215,13 +221,31 @@ function importBackup(user){
 }
 /** 筛选、补记和备份入口均指向已授权账户，不影响客户端计时。 */
 function renderRecords(parent){
- const current=view,{id:userId}=current.user,ledgerId=filters.ledgerId;
+ const ledgerId=filters.ledgerId;
  parent.append(el('h1','账本记录'),el('p','起止时间固定为北京时间；有效时长仅累计专注区间。','muted'));
  const bar=el('div','','toolbar');
- const ledger=optionSelect([['','全部账本'],...current.ledgers.map(x=>[x.id,x.name])],ledgerId),search=el('input');
+ const choices=ledgers=>[['','全部账本'],...ledgers.map(x=>[x.id,x.name])];
+ const ledger=optionSelect(choices(view.ledgers),ledgerId),search=el('input');
  search.placeholder='搜索事项或标签';search.value=filters.q;
  const from=el('input'),to=el('input');from.type=to.type='date';from.value=filters.from;to.value=filters.to;
  bar.append(ledger,search,from,to,button('筛选',()=>load({filters:{ledgerId:ledger.value,q:search.value,from:from.value,to:to.value},page:0})));parent.append(bar);
+ const results=el('div');parent.append(results);
+ updateRecords=current=>{
+  // 下拉展开时不重建其选项，未提交的账本、关键词和日期仍由原筛选控件持有。
+  if(document.activeElement!==ledger){
+   const draft=ledger.value,options=choices(current.ledgers);
+   if(draft&&!options.some(([id])=>id===draft))options.push([draft,'已删除账本']);
+   ledger.replaceChildren(...options.map(([id,name])=>{const option=el('option',name);option.value=id;return option}));
+   ledger.value=draft;
+  }
+  renderRecordResults(results,current,ledgerId);
+ };
+ renderRecordResults(results,view,ledgerId);
+}
+/** 后台刷新只替换已应用筛选的结果区域，表单、焦点和账户选择保持可用。 */
+function renderRecordResults(parent,current,ledgerId){
+ const {id:userId}=current.user;
+ parent.replaceChildren();
  parent.append(controls(
   button('新建账本',()=>namedDialog('新建账本','账本名称',name=>action(userId,{action:'save',kind:'ledger',entity:{id:crypto.randomUUID(),name,deleted:false,revision:1}})),'primary'),
   button('补记',()=>recordDialog(current,ledgerId)),button('导出 JSON',()=>download(userId,'json',ledgerId)),
@@ -359,6 +383,19 @@ function renderSettings(parent){
  parent.append(panel);
  const password=el('section','','panel');passwordForm(password);parent.append(password);
 }
-// 页面轮询仅在前台且无编辑弹窗时执行；读秒及表单输入不会逐字或逐帧发送到服务器。
-setInterval(()=>{if(me&&!me.mustChangePassword&&!document.hidden&&!document.querySelector('dialog')&&tab==='records')load().catch(reportFailure)},15000);
+/** 轮询仅获取当前账本列表，不抢占手动导航，也不会重新载入全部账户。 */
+async function refreshRecords(){
+ const canRefresh=()=>me&&!me.mustChangePassword&&!document.hidden&&!document.querySelector('dialog')&&tab==='records'&&loadingView===null&&updateRecords;
+ const generation=viewGeneration;
+ if(!canRefresh()||refreshingRecords===generation)return;
+ refreshingRecords=generation;
+ const userId=selected;
+ try{
+  const next=await accountState(userId,'record',page,filters);
+  if(generation!==viewGeneration||!canRefresh()||next.user.id!==userId)return;
+  view=next;updateRecords(next);
+ }catch(error){if(generation===viewGeneration)reportFailure(error)}
+ finally{if(refreshingRecords===generation)refreshingRecords=null}
+}
+setInterval(refreshRecords,15000);
 (async()=>{try{const r=await api('me');useSession(r);await load()}catch(error){if(!(error instanceof StaleSessionError))renderLogin()}})();
