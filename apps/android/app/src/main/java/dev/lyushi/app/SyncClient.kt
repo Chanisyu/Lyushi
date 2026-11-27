@@ -46,71 +46,111 @@ internal fun syncBlocking(store: Store, address: String, key: String, verifyIden
     error("本次同步数据较多，将在下次继续")
 }
 
-/** 前台五秒轮询，失败退避至一分钟；后台停止调度，尚未结束的计时仍在本机保存。 */
+/** 前台触发时间账本与饮水轮询，各自按进度退避，并共用活动账户的串行工作线程。 */
 internal class SyncClient(
     private val context: Context, private val store: Store, private val preferences: SharedPreferences,
     private val worker: ExecutorService, private val handler: Handler, private val waterUpdated: () -> Unit,
     private val updated: (Boolean,Boolean) -> Unit
 ) {
+    private data class Connection(val address: String, val key: String, val serverId: String)
+
     private val profile = activeProfile(preferences)
-    private var verifiedConnection = ""
-    private var verifiedServer = ""
-    private var nextWater = 0L
+    private var verifiedConnection: Connection? = null
+    @Volatile private var nextWater = 0L
     @Volatile var waterStatus = "本机记录"; private set
     @Volatile var status = "尚未配置同步"; private set
     private val inFlight = AtomicBoolean(false)
     @Volatile private var stopped = false
-    @Volatile private var next = 0L
-    @Volatile private var delay = 5000L
-    @Volatile private var failed = false
+    @Volatile private var nextLedger = 0L
+    private var ledgerDelay = 5000L
+    private var ledgerFailed = false
+
     fun close() { stopped = true }
+
+    /**
+     * 两条业务链路独立判定到期时间。时间账本的失败或退避不跳过到期的饮水任务，
+     * 饮水失败也不改变账本的重试节奏。串行工作线程保持账户切换时数据库的关闭顺序。
+     */
     fun request(force: Boolean = false) {
-        if (stopped || (!force && SystemClock.elapsedRealtime() < next) || !inFlight.compareAndSet(false, true)) return
-        next = SystemClock.elapsedRealtime() + delay
+        val now = SystemClock.elapsedRealtime()
+        val ledgerDue = force || now >= nextLedger
+        val waterDue = force || now >= nextWater
+        if (stopped || (!ledgerDue && !waterDue) || !inFlight.compareAndSet(false, true)) return
         worker.execute {
-            var changed = false; var reconnected = false
             try {
-                // 未配置时保持单机模式，不连接私人服务器。
-                val address = accountAddress(preferences, profile)
-                val key = SecretVault(context, profileVault(profile)).read()
-                if (address.isEmpty() || key.isEmpty()) status = "尚未配置服务器和设备密钥"
-                else {
-                    val connection = address+"\n"+key
-                    if (verifiedConnection != connection) {
-                        val identity = deviceIdentity(address,key)
-                        val serverId = identity.getString("serverId")
-                        store.bindAccount(identity.getString("userId"),serverId)
-                        verifiedServer = serverId
-                        verifiedConnection = connection
-                        nextWater = 0
-                    }
-                    changed = syncBlocking(store,address,key,false)
-                    reconnected = failed; failed = false; delay = 5000; status = "已同步"
-                    // 先通知时间记录更新，饮水故障单独退避，不改变时间同步结果。
-                    if (changed || reconnected) {
-                        val timeChanged = changed; val timeReconnected = reconnected
-                        handler.post { if (!stopped) updated(timeChanged,timeReconnected) }
-                        changed = false; reconnected = false
-                    }
-                    if (!stopped && (force || SystemClock.elapsedRealtime() >= nextWater)) {
-                        val water = runCatching { syncWaterBlocking(store,address,key,verifiedServer) }
-                        val failure = water.exceptionOrNull()
-                        waterStatus = when (failure) {
-                            null -> "饮水记录已同步"
-                            is IllegalStateException -> failure.message ?: "饮水同步未完成，本机数据已保存"
-                            else -> "饮水同步未完成，本机数据已保存"
-                        }
-                        nextWater = SystemClock.elapsedRealtime() + if (water.isSuccess) 5000 else 30000
-                        handler.post { if (!stopped) waterUpdated() }
-                    }
-                }
-            } catch (error: Exception) {
-                failed = true; delay = minOf(60000, delay * 2)
-                status = if (error is IllegalStateException) error.message ?: "同步未完成" else "本机已保存，等待重连"
+                if (stopped) return@execute
+                // 两个端点都依赖同一账户身份。身份失败只处理本轮到期的业务，避免重复认证。
+                val account = runCatching { connection() }
+                if (ledgerDue && !stopped) syncLedger(account)
+                if (waterDue && !stopped) syncWater(account)
             } finally {
-                next = SystemClock.elapsedRealtime() + delay; inFlight.set(false)
-                handler.post { if (!stopped) updated(changed, reconnected) }
+                inFlight.set(false)
             }
+        }
+    }
+
+    /** 未配置时保持单机模式；地址或密钥变化后必须重新校验账户绑定。 */
+    private fun connection(): Connection? {
+        val address = accountAddress(preferences, profile)
+        val key = SecretVault(context, profileVault(profile)).read()
+        if (address.isEmpty() || key.isEmpty()) {
+            verifiedConnection = null
+            return null
+        }
+        verifiedConnection?.let { if (it.address == address && it.key == key) return it }
+        val identity = deviceIdentity(address, key)
+        val serverId = identity.getString("serverId")
+        store.bindAccount(identity.getString("userId"), serverId)
+        return Connection(address, key, serverId).also { verifiedConnection = it }
+    }
+
+    /** 账本独立更新状态与重连通知，以 5 至 60 秒间隔安排重试。 */
+    private fun syncLedger(account: Result<Connection?>) {
+        var changed = false
+        var reconnected = false
+        try {
+            val connection = account.getOrThrow()
+            if (connection == null) {
+                status = "尚未配置服务器和设备密钥"
+                ledgerFailed = false
+            } else {
+                changed = syncBlocking(store, connection.address, connection.key, false)
+                reconnected = ledgerFailed
+                ledgerFailed = false
+                status = "已同步"
+            }
+            ledgerDelay = 5000L
+        } catch (error: Exception) {
+            ledgerFailed = true
+            ledgerDelay = minOf(60000, ledgerDelay * 2)
+            status = if (error is IllegalStateException) error.message ?: "同步未完成" else "本机已保存，等待重连"
+        } finally {
+            nextLedger = SystemClock.elapsedRealtime() + ledgerDelay
+            handler.post { if (!stopped) updated(changed, reconnected) }
+        }
+    }
+
+    /** 饮水按独立结果设置状态，身份或饮水请求失败时提示本机数据仍然保留。 */
+    private fun syncWater(account: Result<Connection?>) {
+        var delay = 5000L
+        var notify = true
+        try {
+            val connection = account.getOrThrow()
+            if (connection == null) {
+                // 单机状态未变时不通知界面重复扫描本地历史。
+                notify = waterStatus != "本机记录"
+                waterStatus = "本机记录"
+            } else {
+                syncWaterBlocking(store, connection.address, connection.key, connection.serverId)
+                waterStatus = "饮水记录已同步"
+            }
+        } catch (error: Exception) {
+            delay = 30000L
+            val fallback = "饮水同步未完成，本机数据已保存"
+            waterStatus = if (error is IllegalStateException) error.message ?: fallback else fallback
+        } finally {
+            nextWater = SystemClock.elapsedRealtime() + delay
+            if (notify) handler.post { if (!stopped) waterUpdated() }
         }
     }
 }
