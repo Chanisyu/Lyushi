@@ -11,6 +11,8 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.KeyEvent
@@ -165,6 +167,16 @@ internal class WaterDialog(
     private var mode = ""
     private var draftML = 0
     private var stale = false
+    private var displayedDay: LocalDate? = null
+    private val dayHandler = Handler(Looper.getMainLooper())
+    // 零点检查只比较北京时间日期。日期未变化时不打开数据库，离线也能按日更新。
+    private val dayCheck = object : Runnable {
+        override fun run() {
+            if (!isShowing) return
+            refreshIfDayChanged()
+            dayHandler.postDelayed(this, 30_000L)
+        }
+    }
     private val children = mutableListOf<AlertDialog>()
     private val drawing = BottleView(owner)
     private val today = label("",24f)
@@ -201,7 +213,30 @@ internal class WaterDialog(
         refresh()
     }
 
-    override fun onStart() { super.onStart(); window?.setLayout((owner.resources.displayMetrics.widthPixels-dp(20)).coerceAtMost(dp(450)),WindowManager.LayoutParams.WRAP_CONTENT) }
+    override fun onStart() {
+        super.onStart()
+        window?.setLayout((owner.resources.displayMetrics.widthPixels-dp(20)).coerceAtMost(dp(450)),WindowManager.LayoutParams.WRAP_CONTENT)
+        refreshIfDayChanged()
+        dayHandler.removeCallbacks(dayCheck)
+        dayHandler.postDelayed(dayCheck, 30_000L)
+    }
+
+    override fun onStop() {
+        // 对话框销毁前撤销定时任务，避免持有旧的 Activity 或访问已关闭的账户库。
+        dayHandler.removeCallbacks(dayCheck)
+        super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 从后台恢复时立即校验，而不是等待下一次定时检查。
+        if (hasFocus) refreshIfDayChanged()
+    }
+
+    private fun refreshIfDayChanged() {
+        if (displayedDay != LocalDate.now(waterZone)) attempt { refresh() }
+    }
+
     override fun dismiss() { children.toList().forEach { it.dismiss() }; super.dismiss() }
 
     private fun row() = LinearLayout(owner).apply { orientation=LinearLayout.HORIZONTAL }
@@ -343,6 +378,7 @@ internal class WaterDialog(
         val day=LocalDate.now(waterZone)
         val total=waterEntries(data).filter { included(it) && localTime(it.getLong("at")).toLocalDate()==day }.sumOf { it.getLong("ml") }
         today.text="今日饮水 $total mL"
+        displayedDay = day
         if(mode.isNotEmpty() && draftBottle.optString("version")!=bottle.optString("version")) stale=true
         val current=if(mode.isEmpty()) bottle else draftBottle
         drawing.state(current.optInt("capacity"),current.optInt("ml"),if(mode.isEmpty())current.optInt("ml") else draftML,if(stale)"" else mode)
