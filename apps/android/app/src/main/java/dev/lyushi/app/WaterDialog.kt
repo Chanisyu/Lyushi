@@ -49,6 +49,53 @@ private fun waterLabel(kind: String): String = when (kind) {
     else -> "饮水操作"
 }
 
+/** 对比原操作与当前投影。详情仅供核对，不应用候选，也不改变统计。 */
+private fun conflictDetails(conflict: JSONObject, view: JSONObject): String {
+    val command = conflict.getJSONObject("command")
+    val kind = command.getString("kind")
+    val reason = when (conflict.optString("conflict")) {
+        "bottle_exists" -> "其他设备已建立水壶"
+        "bottle_changed" -> "水壶版本或水位已经变化"
+        "capacity_too_small" -> "申请的容量或水位超出当前水壶范围"
+        "nothing_to_undo" -> "当前没有可撤销的水壶操作"
+        "history_changed" -> "记录已被更正、作废或移除"
+        "history_differs" -> "相同编号的备份记录与当前明细不同"
+        "cannot_recover" -> "该操作不能转成饮水补记"
+        else -> "待人工确认"
+    }
+    return buildString {
+        appendLine("原因：$reason")
+        if (kind in listOf("restore-entry", "correct", "void")) {
+            when (kind) {
+                "void" -> appendLine("本机请求：作废这条明细")
+                "correct" -> appendLine("本机请求：更正为 ${command.getInt("ml")} mL")
+                else -> {
+                    val status = if (command.optBoolean("voided")) "已作废" else "有效"
+                    appendLine("备份记录：${waterLabel(command.getString("entry"))} · ${command.getInt("ml")} mL · $status")
+                }
+            }
+            val current = view.optJSONObject("entries")?.optJSONObject(command.getString("target"))
+            if (current == null) append("当前找不到对应明细")
+            else {
+                val status = if (current.optBoolean("voided")) "已作废" else "有效"
+                val at = localTime(current.getLong("at")).format(waterTime)
+                append("当前明细：$at · ${waterLabel(current.getString("kind"))} · ${current.getInt("ml")} mL · $status")
+            }
+        } else {
+            if (kind in listOf("fill", "drink", "pour")) {
+                val from = command.optInt("from")
+                val to = command.optInt("ml")
+                appendLine("本机水位：$from mL → $to mL，变化 ${abs(from - to)} mL")
+            }
+            if (kind in listOf("setup", "restore-bottle", "capacity")) appendLine("本机申请容量：${command.getInt("capacity")} mL")
+            if (kind in listOf("setup", "restore-bottle", "calibrate")) appendLine("本机申请水位：${command.optInt("ml")} mL")
+            val current = view.optJSONObject("bottle")
+            if (current == null) append("当前尚未建立水壶")
+            else append("当前水壶：容量 ${current.getInt("capacity")} mL，剩余 ${current.getInt("ml")} mL")
+        }
+    }
+}
+
 private fun included(e: JSONObject) = !e.getBoolean("voided") && countsWater(e.getString("kind"))
 
 internal fun Store.waterCsv(): String = buildString {
@@ -348,10 +395,17 @@ internal class WaterDialog(
         }.toTypedArray()
         launch(AlertDialog.Builder(owner).setTitle("待核对的饮水操作").setItems(labels) { _,idx ->
             val id=ids[idx]
-            val builder=AlertDialog.Builder(owner).setTitle("核对操作").setMessage("确认实际饮水后可补记。水位按实物另行调整。")
-                .setNegativeButton("取消",null).setNeutralButton("标记已核对") { _,_ -> attempt { submit("dismiss",JSONObject().put("target",id)) } }
-            if(items.getJSONObject(id).getJSONObject("command").getString("kind")=="drink") builder.setPositiveButton("确实喝过，补记") { _,_ -> attempt { submit("recover",JSONObject().put("target",id)) } }
-            launch(builder.create())
+            attempt {
+                // 列表打开后其他设备仍可能同步，点开时重新读取最新投影及待核对项。
+                val view = store.waterView()
+                val conflict = checkNotNull(view.optJSONObject("conflicts")?.optJSONObject(id)) { "此项已核对，请重新打开列表" }
+                val isDrink = conflict.getJSONObject("command").getString("kind") == "drink"
+                val note = if (isDrink) "\n\n确认实际饮水后可补记。水位按实物另行调整。" else ""
+                val builder = AlertDialog.Builder(owner).setTitle(labels[idx]).setMessage(conflictDetails(conflict, view) + note)
+                    .setNegativeButton("取消", null).setNeutralButton("标记已核对") { _,_ -> attempt { submit("dismiss",JSONObject().put("target",id)) } }
+                if (isDrink) builder.setPositiveButton("确实喝过，补记") { _,_ -> attempt { submit("recover",JSONObject().put("target",id)) } }
+                launch(builder.create())
+            }
         }.setNegativeButton("关闭",null).create())
     }
 

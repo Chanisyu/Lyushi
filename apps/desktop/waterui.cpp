@@ -27,6 +27,49 @@ bool counts(const QJsonObject &entry)
 QDateTime beijingTime(qint64 at) { return QDateTime::fromMSecsSinceEpoch(at,zone); }
 QString mlText(int ml) { return QStringLiteral("%1 mL").arg(ml); }
 
+/** 对比原操作与当前投影。详情仅供核对，不应用候选，也不改变累计饮水量或水位。 */
+QString conflictDetails(const QJsonObject &conflict,const QJsonObject &view)
+{
+    const auto command = conflict["command"].toObject();
+    const auto kind = command["kind"].toString();
+    const QMap<QString,QString> reasons{
+        {"bottle_exists","其他设备已建立水壶"}, {"bottle_changed","水壶版本或水位已经变化"},
+        {"capacity_too_small","申请的容量或水位超出当前水壶范围"}, {"nothing_to_undo","当前没有可撤销的水壶操作"},
+        {"history_changed","记录已被更正、作废或移除"}, {"history_differs","相同编号的备份记录与当前明细不同"},
+        {"cannot_recover","该操作不能转成饮水补记"},
+    };
+    QStringList details{QStringLiteral("原因：%1").arg(reasons.value(conflict["conflict"].toString(),QStringLiteral("待人工确认")))};
+    if (kind == "restore-entry" || kind == "correct" || kind == "void") {
+        if (kind == "void") details << QStringLiteral("本机请求：作废这条明细");
+        if (kind == "correct") details << QStringLiteral("本机请求：更正为 %1").arg(mlText(command["ml"].toInt()));
+        if (kind == "restore-entry") {
+            const auto status = command["voided"].toBool() ? QStringLiteral("已作废") : QStringLiteral("有效");
+            details << QStringLiteral("备份记录：%1 · %2 · %3").arg(labelFor(command["entry"].toString()),mlText(command["ml"].toInt()),status);
+        }
+        const auto current = view["entries"].toObject()[command["target"].toString()].toObject();
+        if (current.isEmpty()) details << QStringLiteral("当前找不到对应明细");
+        else {
+            const auto status = current["voided"].toBool() ? QStringLiteral("已作废") : QStringLiteral("有效");
+            details << QStringLiteral("当前明细：%1 · %2 · %3 · %4")
+                .arg(beijingTime(current["at"].toInteger()).toString("yyyy-MM-dd HH:mm:ss"),
+                     labelFor(current["kind"].toString()),mlText(current["ml"].toInt()),status);
+        }
+    } else {
+        if (kind == "fill" || kind == "drink" || kind == "pour") {
+            const int from = command["from"].toInt(), to = command["ml"].toInt();
+            details << QStringLiteral("本机水位：%1 → %2，变化 %3").arg(mlText(from),mlText(to),mlText(qAbs(from-to)));
+        }
+        if (kind == "setup" || kind == "restore-bottle" || kind == "capacity")
+            details << QStringLiteral("本机申请容量：%1").arg(mlText(command["capacity"].toInt()));
+        if (kind == "setup" || kind == "restore-bottle" || kind == "calibrate")
+            details << QStringLiteral("本机申请水位：%1").arg(mlText(command["ml"].toInt()));
+        const auto current = view["bottle"].toObject();
+        if (current.isEmpty()) details << QStringLiteral("当前尚未建立水壶");
+        else details << QStringLiteral("当前水壶：容量 %1，剩余 %2").arg(mlText(current["capacity"].toInt()),mlText(current["ml"].toInt()));
+    }
+    return details.join(QChar(10));
+}
+
 QList<QJsonObject> orderedEntries(const QJsonObject &view)
 {
     QList<QJsonObject> rows;
@@ -240,11 +283,18 @@ class WaterDialog : public QDialog {
         QVBoxLayout layout(&dialog);
         auto *scroll = new QScrollArea; auto *content = new QWidget; auto *items = new QVBoxLayout(content);
         scroll->setWidget(content); scroll->setWidgetResizable(true); layout.addWidget(scroll);
-        for (const auto &value : store.waterView()["conflicts"].toObject()) {
-            const auto c = value.toObject()["command"].toObject(); const auto kind = c["kind"].toString();
-            const auto caption = QStringLiteral("%1　%2　%3").arg(beijingTime(c["at"].toInteger()).toString("yyyy-MM-dd HH:mm"),labelFor(kind),
-                kind=="fill" || kind=="drink" || kind=="pour" ? mlText(qAbs(c["from"].toInt()-c["ml"].toInt())) : QString{});
-            items->addWidget(new QLabel(caption)); auto *row = new QHBoxLayout; items->addLayout(row);
+        const auto view = store.waterView();
+        for (const auto &value : view["conflicts"].toObject()) {
+            const auto conflict = value.toObject();
+            const auto c = conflict["command"].toObject();
+            const auto kind = c["kind"].toString();
+            const auto caption = QStringLiteral("%1 · %2\n%3").arg(
+                beijingTime(c["at"].toInteger()).toString("yyyy-MM-dd HH:mm:ss"),labelFor(kind),conflictDetails(conflict,view));
+            auto *detail = new QLabel(caption);
+            detail->setWordWrap(true);
+            items->addWidget(detail);
+            auto *row = new QHBoxLayout;
+            items->addLayout(row);
             auto resolve = [&,c](const QString &resolution) {
                 attempt([&] { submit({{"kind",resolution},{"target",c["id"]}}); dialog.accept(); });
             };
