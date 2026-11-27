@@ -34,6 +34,7 @@ class MainActivity : Activity() {
     }
     private lateinit var store: Store
     private lateinit var root: LinearLayout
+    private lateinit var viewport: ScrollView
     private lateinit var task: EditText
     private lateinit var clock: TextView
     private lateinit var elapsed: TextView
@@ -53,23 +54,42 @@ class MainActivity : Activity() {
     private val locked = mutableListOf<View>()
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
-    // 表单界面验收使用独立偏好与数据库，禁止继承日常账户地址或设备密钥。
-    private val activeEditorUiTest get() = BuildConfig.DEBUG && intent.getStringExtra("test_action") in listOf("active-editor-ui-test","active-editor-reopen-test")
-    private val preferences by lazy { getSharedPreferences(if (activeEditorUiTest) "active-editor-ui-settings" else "settings", Context.MODE_PRIVATE) }
+    // 界面验收各用独立偏好与数据库，禁止继承日常账户地址或设备密钥。
+    private val uiTestSpace: String? get() = if (!BuildConfig.DEBUG) null else when (intent.getStringExtra("test_action")) {
+        "active-editor-ui-test", "active-editor-reopen-test" -> "active-editor-ui"
+        "sync-navigation-ui-test" -> "sync-navigation-ui"
+        else -> null
+    }
+    private val preferences by lazy { getSharedPreferences(uiTestSpace?.let { "$it-settings" } ?: "settings", Context.MODE_PRIVATE) }
     private var loadedProfile = "local"
     private var accountReloadQueued = false
     private fun reloadAccount() { if(!accountReloadQueued && !isDestroyed) { accountReloadQueued=true;recreate() } }
     private val profileListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _,name -> if(name=="accountProfile" && loadedProfile!=activeProfile(preferences)) reloadAccount() }
     private var selected = ""
     private var screen = "main"
+    private var viewedLedgerId: String? = null
+    private var viewedRecordId: String? = null
     private var busy = false
+        set(value) {
+            if (field == value) return
+            field = value
+            // 连接失败也通过此处恢复控件，空闲轮询无需读取设置页的计时状态。
+            if (screen == "settings") updateSettingsLocks()
+        }
+    private var syncRefreshPending = false
     /** 系统文件选择器可跨同步和旋转返回，操作范围独立于届时的主页面选择。 */
     private data class LedgerFileRequest(val mode: Int, val profile: String, val ledgerId: String?) {
         val requestCode: Int get() = if (mode == 0) 100 else 101
     }
     private var ledgerFileRequest: LedgerFileRequest? = null
     private lateinit var focusHint: TextView
-    private val refresh = object : Runnable { override fun run() { if (screen == "main") safely { render() }; if (!busy) sync.request(); handler.postDelayed(this, 1000) } }
+    private val refresh = object : Runnable {
+        override fun run() {
+            safely { refreshSynchronizedView() }
+            if (!busy) sync.request()
+            handler.postDelayed(this, 1000)
+        }
+    }
 
     /** 手势期间保留按下时可见的动作。键盘和无障碍点击使用最近一次渲染的动作。 */
     private class TimerButton(context: Context) : Button(context) {
@@ -103,10 +123,12 @@ class MainActivity : Activity() {
         if (android.os.Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
             if (!busy) { if (screen != "main") showMain() else finish() }
         }
-        if (activeEditorUiTest && savedInstanceState == null && intent.getStringExtra("test_action") == "active-editor-ui-test") {
-            deleteDatabase("active-editor-ui-check.sqlite"); editorTestStage = 0
+        val testDatabase = uiTestSpace?.let { "$it-check.sqlite" }
+        if (testDatabase != null && savedInstanceState == null && intent.getStringExtra("test_action") != "active-editor-reopen-test") {
+            deleteDatabase(testDatabase)
+            if (uiTestSpace == "active-editor-ui") editorTestStage = 0
         }
-        loadedProfile=activeProfile(preferences); store = Store(this, if (activeEditorUiTest) "active-editor-ui-check.sqlite" else accountDatabase(loadedProfile)); preferences.registerOnSharedPreferenceChangeListener(profileListener); selected = preferences.getString("ledger."+loadedProfile, "") ?: ""
+        loadedProfile=activeProfile(preferences); store = Store(this, testDatabase ?: accountDatabase(loadedProfile)); preferences.registerOnSharedPreferenceChangeListener(profileListener); selected = preferences.getString("ledger."+loadedProfile, "") ?: ""
         savedInstanceState?.let { state ->
             val mode = state.getInt("fileMode", -1)
             val profile = state.getString("fileProfile")
@@ -114,10 +136,8 @@ class MainActivity : Activity() {
         }
         sync = SyncClient(applicationContext, store, preferences, worker, handler, { if (!isDestroyed) safely { waterDialog?.refresh() } }) { changed, reconnected ->
             if (!isDestroyed) safely {
-                if (changed && !busy) {
-                    applySynchronizedChange()
-                }
-                else if (screen == "main") render()
+                if (changed) syncRefreshPending = true
+                refreshSynchronizedView()
                 if (reconnected) Toast.makeText(this, "已重新连接服务器，双方内容均已保留；冲突可在结束记录后查看。", Toast.LENGTH_LONG).show()
             }
         }
@@ -160,17 +180,59 @@ class MainActivity : Activity() {
     private fun button(text: String, block: () -> Unit) = Button(this).apply { isAllCaps = false; this.text = text; setOnClickListener { safely(block) } }
     /** 系统栏的实际 inset 决定边距，兼容 Android 17 的全屏窗口布局。 */
     private fun page(title: String) {
-        locked.clear(); root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val scroll = ScrollView(this).apply { addView(root) }; setContentView(scroll)
+        locked.clear(); viewedLedgerId = null; viewedRecordId = null
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root = content
+        viewport = ScrollView(this).apply { addView(content) }; setContentView(viewport)
         val gap = (24 * resources.displayMetrics.density).toInt()
-        scroll.setOnApplyWindowInsetsListener { _, insets -> val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars()); root.setPadding(gap + bars.left, gap + bars.top, gap + bars.right, gap + bars.bottom); insets }
-        scroll.requestApplyInsets(); root.addView(label(title, 30f))
+        viewport.setOnApplyWindowInsetsListener { _, insets -> val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars()); content.setPadding(gap + bars.left, gap + bars.top, gap + bars.right, gap + bars.bottom); insets }
+        viewport.requestApplyInsets(); root.addView(label(title, 30f))
     }
     private fun idle() { check(!busy && store.active() == null) { "请先结束记录或等待文件处理完成" } }
-    /** 同步后重建主页面并执行管理限制；活动编辑草稿独立保留并检查原前置版本。 */
+    /** 同步发生在文件或连接操作期间时，保留刷新请求，待当前操作完成后应用。 */
+    private fun refreshSynchronizedView() {
+        if (syncRefreshPending && !busy) {
+            applySynchronizedChange()
+            syncRefreshPending = false
+        } else if (screen == "main") render()
+    }
+
+    /** 重建列表时恢复原滚动位置；对话框仍持有打开时的账本、记录与版本。 */
+    private fun refreshAtSameScroll(build: () -> Unit) {
+        val top = viewport.scrollY
+        build()
+        val refreshed = viewport
+        refreshed.post { if (viewport === refreshed) refreshed.scrollTo(0, top) }
+    }
+
+    /** 同步刷新当前页面。远端开始计时时退出受限页面；设置页只调整权限，保留输入。 */
     private fun applySynchronizedChange() {
-        val draft = if (screen == "main" && task.isEnabled && store.active() == null) task.text.toString() else null
-        if (store.active() != null) dialogs.toList().filter { it !== activeEditor }.forEach { it.dismiss() }
+        val running = store.active() != null
+        if (running) dialogs.toList().filter { it !== activeEditor }.forEach { it.dismiss() }
+        // 账户字段保留在当前视图中，不写入状态包或偏好，计时期间仅禁止账户操作。
+        if (screen == "settings") {
+            updateSettingsLocks()
+            return
+        }
+        if (!running && (screen == "details" || screen == "segments")) {
+            val ledgerId = checkNotNull(viewedLedgerId)
+            if (store.find("ledger", ledgerId)?.getBoolean("deleted") == false) {
+                val record = viewedRecordId?.let { store.find("record", it) }
+                if (record != null && !record.getBoolean("deleted") && record.getString("ledgerId") == ledgerId) {
+                    refreshAtSameScroll { showSegments(record) }
+                } else if (screen == "segments") {
+                    showDetails(ledgerId)
+                    Toast.makeText(this, "当前记录已由其他设备移除。", Toast.LENGTH_SHORT).show()
+                } else refreshAtSameScroll { showDetails(ledgerId) }
+                return
+            }
+            Toast.makeText(this, "当前账本已由其他设备删除。", Toast.LENGTH_SHORT).show()
+        }
+        if (!running && screen == "conflicts") {
+            refreshAtSameScroll(::showConflicts)
+            return
+        }
+        val draft = if (screen == "main" && task.isEnabled && !running) task.text.toString() else null
         showMain(); if (draft != null) task.setText(draft)
     }
     /** 同名账本的选择按编号保存，刷新页面不改变未结束记录所属账本。 */
@@ -346,6 +408,8 @@ class MainActivity : Activity() {
     /** 主任务汇总独立于时间区间列表，修改后重新读取聚合版本，避免覆盖另一设备的新数据。 */
     private fun showSegments(record: JSONObject) {
         idle(); screen = "segments"; page("分段明细 · ${record.getString("task")}")
+        viewedLedgerId = record.getString("ledgerId")
+        viewedRecordId = record.getString("id")
         taskSegments(record).forEachIndexed { index, segment ->
             val item = segmentRecord(record,index); val kind = if (segment.getString("kind") == "focus") "专注" else "分心"
             root.addView(button("$kind · ${item.getString("task")}\n${dateText(item.getLong("started"))} → ${dateText(item.getLong("ended"))}\n${durationText(item.getLong("ended")-item.getLong("started"))} · ${item.optString("tag", "无标签")}") { edit(record.getString("ledgerId"),record,index) })
@@ -398,9 +462,10 @@ class MainActivity : Activity() {
         val dialog = AlertDialog.Builder(this).setTitle(title).setView(input).setPositiveButton("保存", null).setNegativeButton("取消", null).create()
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { safely { idle(); save(input.text.toString()); dialog.dismiss() } } }; dialog.present()
     }
-    /** 明细绑定打开时的账本编号；同步刷新主页面后，已打开表单仍只指向该账本。 */
+    /** 明细绑定打开时的账本编号，远端刷新和已打开的表单均沿用该编号。 */
     private fun showDetails(ledgerId: String = selected) {
         idle(); val ledger = store.liveLedger(ledgerId); screen = "details"; page(ledger.getString("name"))
+        viewedLedgerId = ledgerId
         root.addView(label("起止时间均为北京时间", 13f))
         root.addView(button("补记") { edit(ledgerId) })
         val records = store.entities("record").filter { it.getString("ledgerId") == ledgerId }.sortedByDescending { it.getLong("started") }
@@ -472,10 +537,10 @@ class MainActivity : Activity() {
         root.addView(button("保存外观") { check(!busy) { "正在处理账户连接" };check(preferences.edit().putInt("theme",theme.selectedItemPosition).commit()) { "设置保存失败" };recreate() })
         val current = activeProfile(preferences)
         val ids = listOf("local") + (preferences.getStringSet("accountProfiles",emptySet()) ?: emptySet()).sorted()
-        root.addView(label("已保存账户",14f));val profiles=Spinner(this).apply { adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,ids.map { if(it=="local") "单机数据" else preferences.getString("accounts.$it.name",it.take(12))!! });setSelection(ids.indexOf(current).coerceAtLeast(0));isEnabled=store.active()==null };root.addView(profiles)
-        root.addView(button("切换至所选数据空间") { idle();check(preferences.edit().putString("accountProfile",ids[profiles.selectedItemPosition]).commit()) { "账户切换保存失败" };reloadAccount() }.apply { isEnabled=store.active()==null })
-        val server=EditText(this).apply { hint="服务器地址 https://";setSingleLine(true);setText(accountAddress(preferences));isEnabled=store.active()==null };root.addView(server)
-        val key=EditText(this).apply { hint="后台生成的设备密钥";inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD;isEnabled=store.active()==null };root.addView(key)
+        root.addView(label("已保存账户",14f));val profiles=Spinner(this).apply { adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,ids.map { if(it=="local") "单机数据" else preferences.getString("accounts.$it.name",it.take(12))!! });setSelection(ids.indexOf(current).coerceAtLeast(0)) };root.addView(profiles.also { locked.add(it) })
+        root.addView(button("切换至所选数据空间") { idle();check(preferences.edit().putString("accountProfile",ids[profiles.selectedItemPosition]).commit()) { "账户切换保存失败" };reloadAccount() }.also { locked.add(it) })
+        val server=EditText(this).apply { hint="服务器地址 https://";setSingleLine(true);setText(accountAddress(preferences)) };root.addView(server.also { locked.add(it) })
+        val key=EditText(this).apply { hint="后台生成的设备密钥";inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD };root.addView(key.also { locked.add(it) })
         safely { key.setText(SecretVault(this,profileVault(current)).read()) }
         root.addView(label("连接前先验证账户；不同账户的数据与密钥独立保存。记录期间禁止切换账户。",14f))
         root.addView(button("验证并连接账户") {
@@ -503,8 +568,15 @@ class MainActivity : Activity() {
                     else safely { connect(false) }
                 },onFailure={Toast.makeText(this,it.message?:"账户验证未完成",Toast.LENGTH_LONG).show()}) } }
             }
-        }.apply { isEnabled=store.active()==null })
+        }.also { locked.add(it) })
         root.addView(button("返回") { check(!busy) { "正在验证账户" };showMain() })
+        updateSettingsLocks()
+    }
+
+    /** 当前页面的账户控件仅在空闲时可用，原输入在下次解锁时继续使用。 */
+    private fun updateSettingsLocks() {
+        val enabled = !busy && store.active() == null
+        locked.forEach { it.isEnabled = enabled }
     }
     /** Android 文件选择器授予单文件访问权；取消选择不修改数据。 */
     private fun chooseFile(mode: Int, ledgerId: String? = null) {
@@ -560,6 +632,51 @@ class MainActivity : Activity() {
     }
     /** 调试检查用独立 SQLite 文件，覆盖导入、隔离和跨进程恢复；不记录设备密钥。 */
     private fun debugTest(mode: String) {
+        if (mode == "sync-navigation-ui-test") {
+            // 利用独立数据库模拟同步已经落库的状态，在真实 Activity 检查路由、草稿和控件锁。
+            val result = runCatching {
+                val ledger = store.addLedger("同步前账本")
+                showSettings()
+                val inputs = (0 until root.childCount).map(root::getChildAt).filterIsInstance<EditText>()
+                val (server, key) = inputs
+                val addressDraft = "https://draft.invalid"
+                val keyDraft = "test-unsaved-device-key"
+                server.setText(addressDraft); key.setText(keyDraft)
+                busy = true
+                store.renameLedger(ledger, "同步后账本")
+                syncRefreshPending = true
+                refreshSynchronizedView()
+                check(syncRefreshPending && !server.isEnabled && !key.isEnabled)
+                busy = false
+                refreshSynchronizedView()
+                check(!syncRefreshPending && screen == "settings" && server.isEnabled && key.isEnabled)
+                check(server.text.toString() == addressDraft && key.text.toString() == keyDraft)
+                store.start(ledger, "模拟远端计时")
+                applySynchronizedChange()
+                check(screen == "settings" && !server.isEnabled && !key.isEnabled && key.text.toString() == keyDraft)
+                val running = checkNotNull(store.active())
+                store.finish(running.getLong("started") + 1000)
+                applySynchronizedChange()
+                check(screen == "settings" && server.isEnabled && key.isEnabled && server.text.toString() == addressDraft)
+                showDetails(ledger)
+                store.renameLedger(ledger, "同步后的新名称")
+                applySynchronizedChange()
+                check(screen == "details" && viewedLedgerId == ledger && (root.getChildAt(0) as TextView).text == "同步后的新名称")
+                showSegments(store.entities("record").single())
+                store.deleteRecord(running.getString("id"))
+                applySynchronizedChange()
+                check(screen == "details" && viewedLedgerId == ledger)
+                store.start(ledger, "再开始计时")
+                applySynchronizedChange()
+                check(screen == "main" && action.displayed is TimerAction.Finish)
+                JSONObject().put("passed", true)
+            }
+            File(filesDir, "sync-navigation-ui-result.json").writeText(
+                result.getOrElse { JSONObject().put("passed", false).put("error", it.stackTraceToString()) }.toString(2),
+                Charsets.UTF_8
+            )
+            return
+        }
         if (mode == "active-editor-ui-test" || mode == "active-editor-reopen-test") {
             // 真实 Activity 旋转及表单交互验收；偏好和数据库均已在入口隔离。
             val report = File(filesDir,"active-editor-ui-result.json")
