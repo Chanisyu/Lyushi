@@ -27,14 +27,25 @@ static bool integer(const QJsonValue &value)
 {
     return value.isDouble() && std::isfinite(value.toDouble()) && std::floor(value.toDouble()) == value.toDouble();
 }
-/** 账本/事项长度限制用于拒绝明显损坏的文件，而不是截断用户内容。 */
+/** 匹配同步服务的 Unicode 空白规则。保留有效编号原文，以免改变实体或父版本的身份。 */
+static bool validIdentifier(const QJsonValue &value)
+{
+    if (!value.isString()) return false;
+    const auto identifier = value.toString();
+    if (identifier.size() > 128) return false;
+    for (const QChar character : identifier) {
+        if (!character.isSpace() && character.unicode() != 0x0085) return true;
+    }
+    return false;
+}
+
+/** 验证完整备份的实体身份，对冲突存档也执行同样的检查。 */
 static void validateEntity(const QJsonObject &entity)
 {
-    ensure(entity.value("id").isString() && !entity["id"].toString().isEmpty() && entity["id"].toString().size() <= 128,
-           QStringLiteral("数据缺少有效编号"));
+    ensure(validIdentifier(entity["id"]), QStringLiteral("数据缺少有效编号"));
     ensure(entity["deleted"].isBool() && integer(entity["revision"]) && entity["revision"].toInteger() >= 1 && entity["revision"].toInteger() <= 9007199254740991LL,
            QStringLiteral("数据版本或删除状态无效"));
-    ensure(!entity.contains("version") || (entity["version"].isString() && !entity["version"].toString().isEmpty() && entity["version"].toString().size() <= 128), QStringLiteral("版本编号无效"));
+    ensure(!entity.contains("version") || validIdentifier(entity["version"]), QStringLiteral("版本编号无效"));
 }
 /** 导入内容只接受当前协议字段，避免本机接受后变成服务器永远拒绝的操作。 */
 static void onlyFields(const QJsonObject &entity, const QStringList &allowed)
@@ -54,7 +65,7 @@ void validateRecord(const QJsonObject &record, bool allowRunning)
     ensure(!record.contains("tag") || (record["tag"].isString() && !record["tag"].toString().trimmed().isEmpty() && record["tag"].toString().size() <= 200), QStringLiteral("任务标签无效"));
     ensure(record["task"].isString() && !record["task"].toString().trimmed().isEmpty() && record["task"].toString().size() <= 10000,
            QStringLiteral("事项不能为空，且不能超过一万字"));
-    ensure(record["ledgerId"].isString() && !record["ledgerId"].toString().isEmpty() && record["ledgerId"].toString().size() <= 128, QStringLiteral("记录缺少有效账本编号"));
+    ensure(validIdentifier(record["ledgerId"]), QStringLiteral("记录缺少有效账本编号"));
     ensure(integer(record["started"]) && record["started"].toInteger() >= 0 && record["started"].toInteger() < 253402271999000LL
            && ((allowRunning && record["ended"].isNull()) || (integer(record["ended"]) && record["ended"].toInteger() >= record["started"].toInteger() && record["ended"].toInteger() < 253402271999000LL)),
            QStringLiteral("起止时间无效；结束不能早于开始"));

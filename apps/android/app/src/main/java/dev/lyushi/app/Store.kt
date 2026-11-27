@@ -259,10 +259,15 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
     private fun integer(entity: JSONObject, key: String): Long {
         val value = entity.get(key); check(value is Number && value.toDouble().isFinite() && value.toDouble() == value.toLong().toDouble()) { "无效整数：$key" }; return value.toLong()
     }
+    /** Unicode 分隔符加制表、换行和下一行控制符，与服务器的空白规则一致。有效编号保留原文。 */
+    private fun validIdentifier(value: Any?): Boolean = value is String && value.length <= 128 && value.any {
+        !Character.isSpaceChar(it) && it !in '\u0009'..'\u000d' && it != '\u0085'
+    }
+
     private fun validateEntity(entity: JSONObject) {
-        check(entity.get("id") is String && entity.getString("id").isNotEmpty() && entity.getString("id").length <= 128) { "无效编号" }
+        check(validIdentifier(entity.opt("id"))) { "无效编号" }
         check(entity.get("deleted") is Boolean && integer(entity, "revision") in 1..9007199254740991L) { "版本或删除状态无效" }
-        check(!entity.has("version") || (entity.get("version") is String && entity.getString("version").length in 1..128)) { "版本编号无效" }
+        check(!entity.has("version") || validIdentifier(entity.opt("version"))) { "版本编号无效" }
     }
     /** 严格识别协议字段，避免接受服务器无法处理的扩展字段并卡住上传队列。 */
     private fun onlyFields(entity: JSONObject, allowed: Set<String>) { check(entity.keys().asSequence().all { it in allowed }) { "备份包含当前版本不支持的字段" } }
@@ -275,7 +280,7 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
         onlyFields(entity,setOf("id","ledgerId","task","started","ended","deleted","revision","version","tag","segments"))
         check(!entity.has("tag") || (entity.get("tag") is String && entity.getString("tag").isNotBlank() && entity.getString("tag").length <= 200)) { "任务标签无效" }
         check(entity.get("task") is String && entity.getString("task").isNotBlank() && entity.getString("task").length <= 10000) { "事项不能为空，且不能超过一万字" }
-        check(entity.get("ledgerId") is String && entity.getString("ledgerId").length in 1..128) { "记录缺少有效账本编号" }
+        check(validIdentifier(entity.opt("ledgerId"))) { "记录缺少有效账本编号" }
         val start = integer(entity, "started")
         check(start >= 0 && start < 253402271999000L) { "开始时间无效" }
         validateSegments(entity, allowRunning)

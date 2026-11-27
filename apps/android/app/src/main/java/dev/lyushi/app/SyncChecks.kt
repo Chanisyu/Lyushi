@@ -102,6 +102,19 @@ internal fun runSyncChecks(context: Context): JSONObject {
         // 当前协议未知字段必须在导入时拒绝，不能变成服务器永远拒绝的待传操作。
         val unsupported = JSONObject(backup.toString()); unsupported.getJSONArray("records").getJSONObject(0).put("futureField","unsupported")
         check(runCatching { store.importBackup(unsupported) }.isFailure)
+        // 空白编号在冲突存档中也会阻塞同步；验证晚到的错误回滚前面的记录及待上传操作。
+        val beforeIdentityCheck = canonical(store.syncRequest())
+        for (field in listOf("id", "ledgerId", "version")) {
+            val invalidBackup = JSONObject(backup.toString())
+            val original = invalidBackup.getJSONArray("records").getJSONObject(0)
+            val imported = JSONObject(original.toString())
+                .put("id", "valid-before-bad-archive")
+            val archived = JSONObject(imported.toString()).put(field, "\t\u0085\u3000")
+            invalidBackup.put("records", JSONArray().put(imported))
+            invalidBackup.put("conflicts", JSONArray().put(JSONObject().put("kind", "record").put("entity", archived).put("archived", true)))
+            check(runCatching { store.importBackup(invalidBackup) }.isFailure)
+            check(store.entities("record").isEmpty() && canonical(store.syncRequest()) == beforeIdentityCheck)
+        }
         // 标签场景使用独立数据库，验证名称身份、历史快照、备份与跨页远端删除。
         context.deleteDatabase("tag-check.sqlite")
         Store(context, "tag-check.sqlite").use { tagged ->

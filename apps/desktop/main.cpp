@@ -469,6 +469,20 @@ static void selfTest(Store &store, const QString &directory)
     auto future = unsupportedRows.first().toObject(); future["futureField"] = "unsupported"; unsupportedRows[0] = future; unsupported["records"] = unsupportedRows;
     rejected = false; try { store.importBackup(unsupported); } catch (...) { rejected = true; }
     ensure(rejected && store.entities("record").size() == 2, "unknown field was accepted");
+    // 空白编号出现在最后处理的冲突存档时，之前新增的有效记录也必须从数据库和待上传队列回滚。
+    const auto queueBeforeIdentityCheck = store.syncRequest();
+    for (const auto field : {"id", "ledgerId", "version"}) {
+        auto blankBackup = backup;
+        auto imported = backup["records"].toArray().first().toObject();
+        imported["id"] = "valid-before-bad-archive";
+        blankBackup["records"] = QJsonArray{imported};
+        auto archived = imported;
+        archived[field] = QStringLiteral("\t\u0085\u3000");
+        blankBackup["conflicts"] = QJsonArray{QJsonObject{{"kind", "record"}, {"entity", archived}, {"archived", true}}};
+        rejected = false; try { store.importBackup(blankBackup); } catch (...) { rejected = true; }
+        ensure(rejected && store.entities("record").size() == 2 && store.syncRequest() == queueBeforeIdentityCheck,
+               "blank archive identity was accepted or import did not roll back");
+    }
     auto conflicted = backup; rows = backup["records"].toArray(); changed = rows[0].toObject(); changed["task"] = "另一版本"; rows[0] = changed; conflicted["records"] = rows;
     ensure(store.importBackup(conflicted)["conflicts"].toInt() == 1, "conflict preservation failed");
     ensure(store.importBackup(conflicted)["conflicts"].toInt() == 0, "conflict dedup failed");
