@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.view.MotionEvent
 import android.view.View
 import android.widget.*
 import org.json.JSONObject
@@ -36,7 +37,7 @@ class MainActivity : Activity() {
     private lateinit var task: EditText
     private lateinit var clock: TextView
     private lateinit var elapsed: TextView
-    private lateinit var action: Button
+    private lateinit var action: TimerButton
     private lateinit var ledgerSpinner: Spinner
     private lateinit var tagSpinner: Spinner
     private var selectedTag = ""
@@ -67,10 +68,31 @@ class MainActivity : Activity() {
         val requestCode: Int get() = if (mode == 0) 100 else 101
     }
     private var ledgerFileRequest: LedgerFileRequest? = null
-    private var actionRecordAtPress: String? = null
-    private var actionVersionAtPress: String? = null
     private lateinit var focusHint: TextView
     private val refresh = object : Runnable { override fun run() { if (screen == "main") safely { render() }; if (!busy) sync.request(); handler.postDelayed(this, 1000) } }
+
+    /** 手势期间保留按下时可见的动作。键盘和无障碍点击使用最近一次渲染的动作。 */
+    private class TimerButton(context: Context) : Button(context) {
+        private class Press(val action: TimerAction)
+        private var press: Press? = null
+        var displayed: TimerAction = TimerAction.Start
+
+        fun consumeAction(): TimerAction = (press?.action ?: displayed).also { press = null }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> press = Press(displayed)
+                MotionEvent.ACTION_CANCEL -> press = null
+            }
+            val handled = super.onTouchEvent(event)
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                // 系统可能已排队分发点击。排在其后清理无点击的手势，避免影响下一次无障碍操作。
+                val completed = press
+                post { if (press === completed) press = null }
+            }
+            return handled
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val theme = preferences.getInt("theme", 0)
@@ -190,27 +212,28 @@ class MainActivity : Activity() {
             promptName("新增标签（最多 200 字）", "") { selectedTag = store.addTag(it); showMain(); task.setText(draft); sync.request(true) }
         }.also { locked.add(it) }); root.addView(tagRow)
         elapsed = label("00:00:00", 42f).apply { gravity = android.view.Gravity.CENTER }; root.addView(elapsed)
-        action = button("开始记录") {
-            check(!busy) { "正在处理文件" }; val current = store.active()?.getString("id") ?: ""
-            val intended = actionRecordAtPress ?: current; actionRecordAtPress = null
-            val version = actionVersionAtPress ?: store.active()?.optString("version"); actionVersionAtPress = null
-            check(version == store.active()?.optString("version")) { "计时状态已由其他设备改变，请核对后重试" }
-            check(intended == current) { "计时状态已由其他设备改变，请核对页面后再操作" }
-            if (store.active() == null) store.start(selected, task.text.toString(), chosenTag(tagSpinner)) else if (isDistracted(store.active())) store.resumeFocus(System.currentTimeMillis(), version!!) else { store.finish(expectedVersion = version); task.setText("") }; showMain(); sync.request(true)
+        action = TimerButton(this).apply {
+            isAllCaps = false
+            setOnClickListener { view -> safely {
+                val intended = consumeAction()
+                check(!busy) { "正在处理文件" }
+                check(screen == "main" && view === action && loadedProfile == activeProfile(preferences)) {
+                    "计时页面已更新，请核对后再操作"
+                }
+                store.applyTimerAction(intended, selected, task.text.toString(), chosenTag(tagSpinner))
+                showMain()
+                sync.request(true)
+            } }
         }
-        // 返回 false，让系统保留正常点击与无障碍行为；这里只捕获用户按下时的操作对象。
-        action.setOnTouchListener { _, event ->
-            if (event.action == android.view.MotionEvent.ACTION_DOWN) { actionRecordAtPress = store.active()?.getString("id") ?: ""; actionVersionAtPress = store.active()?.optString("version") }
-            else if (event.action == android.view.MotionEvent.ACTION_CANCEL) { actionRecordAtPress = null; actionVersionAtPress = null }
-            false
-        }; root.addView(action)
+        root.addView(action)
         focusHint = label("", 14f); root.addView(focusHint)
         val distracted = isDistracted(current)
         if (current != null && !distracted) root.addView(button("分心一下") { startDistraction() })
-        if (distracted) root.addView(button("结束全部") {
-            val version = store.active()!!.getString("version")
+        if (current != null && distracted) root.addView(button("结束全部") {
+            val id = current.getString("id")
+            val version = current.getString("version")
             AlertDialog.Builder(this).setTitle("结束全部").setMessage("结束分心和本次任务？已记录的全部时间区间将保留。")
-                .setNegativeButton("取消",null).setPositiveButton("结束") { _, _ -> safely { store.finish(expectedVersion = version); showMain(); sync.request(true) } }.create().present()
+                .setNegativeButton("取消",null).setPositiveButton("结束") { _, _ -> safely { store.finish(expectedVersion = version, expectedId = id); showMain(); sync.request(true) } }.create().present()
         })
         root.addView(button("账本明细与管理") { idle(); check(selected.isNotEmpty()) { "请先新建账本" }; showDetails() }.also { locked.add(it) })
         root.addView(button("从 JSON 备份恢复") { chooseFile(0) }.also { locked.add(it) })
@@ -353,7 +376,14 @@ class MainActivity : Activity() {
         val now = System.currentTimeMillis(); clock.text = dateText(now) + " · 北京时间"
         val current = store.active(); val running = current != null
         locked.forEach { it.isEnabled = !running && !busy }; task.isEnabled = !running && !busy
-        action.isEnabled = !busy && (running || selected.isNotEmpty()); action.text = if (isDistracted(current)) "结束分心并继续" else if (running) "结束记录" else "开始记录"
+        val displayed = TimerAction.displayed(current)
+        action.displayed = displayed
+        action.isEnabled = !busy && (running || selected.isNotEmpty())
+        action.text = when (displayed) {
+            TimerAction.Start -> "开始记录"
+            is TimerAction.Finish -> "结束记录"
+            is TimerAction.Resume -> "结束分心并继续"
+        }
         val display = current?.let { segmentRecord(it, taskSegments(it).lastIndex) }
         if (display != null && task.text.toString() != display.getString("task")) task.setText(display.getString("task"))
         focusHint.text = if (isDistracted(current)) "分心中 · 待恢复：${current!!.getString("task")}" else if (running) "原任务累计有效时长" else ""

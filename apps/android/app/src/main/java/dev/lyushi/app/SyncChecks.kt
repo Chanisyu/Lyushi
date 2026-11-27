@@ -54,10 +54,18 @@ internal fun runSyncChecks(context: Context): JSONObject {
         // 无变化的轮询应保持原有活动与同步位置，不产生新的待上传操作。
         check(!deliver(emptyList()) && store.active()!=null && store.pendingCount()==0L)
 
+        // 旧的开始按钮不能结束新活动，旧的结束按钮不能结束另一记录或重新开始。
+        val running = checkNotNull(store.active())
+        val displayed = TimerAction.displayed(running) as TimerAction.Finish
+        check(runCatching { store.applyTimerAction(TimerAction.Start,book,"过期开始","") }.isFailure)
+        check(runCatching { store.applyTimerAction(displayed.copy(id = "another-record"),book,"","") }.isFailure)
+        check(store.active()?.getString("version") == displayed.version && store.pendingCount() == 0L)
+
         // 别的设备结束后，本机应用同一身份的结束状态，而不是创建另一条记录。
-        val ended = JSONObject(store.active()!!.toString()).put("ended",store.active()!!.getLong("started")+1000).put("version","remote-end")
+        val ended = JSONObject(running.toString()).put("ended",running.getLong("started")+1000).put("version","remote-end")
         deliver(listOf("record" to listOf(ended)))
-        check(store.active()==null && store.entities("record").size==1)
+        check(runCatching { store.applyTimerAction(displayed,book,"过期结束","") }.isFailure)
+        check(store.active()==null && store.entities("record").size==1 && store.pendingCount()==0L)
         val a = JSONObject(ended.toString()).put("version","branch-a").put("task","离线版本 A")
         val b = JSONObject(ended.toString()).put("version","branch-b").put("task","离线版本 B")
         deliver(listOf("record" to listOf(a,b)))

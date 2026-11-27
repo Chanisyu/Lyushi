@@ -22,6 +22,22 @@ internal fun canonical(value: Any?): String = when (value) {
     else -> value.toString()
 }
 
+/** 计时按钮的文案和操作共用同一份界面快照。活动操作还必须携带显示时的记录编号和版本。 */
+internal sealed interface TimerAction {
+    data object Start : TimerAction
+    data class Finish(val id: String, val version: String) : TimerAction
+    data class Resume(val id: String, val version: String) : TimerAction
+
+    companion object {
+        fun displayed(record: JSONObject?): TimerAction {
+            if (record == null) return Start
+            val id = record.getString("id")
+            val version = record.getString("version")
+            return if (isDistracted(record)) Resume(id, version) else Finish(id, version)
+        }
+    }
+}
+
 /**
  * 本机存储与桌面采用同一 JSON 数据约定。实体变更和待上传操作在同一事务保存。
  * 独立包名和数据库不会覆盖技术原型；删除保留状态供后续同步传播。
@@ -120,11 +136,30 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
         if (tag.isNotEmpty()) record.put("tag", tag)
         save("record", record)
     }
-    fun finish(ended: Long = System.currentTimeMillis(), expectedVersion: String? = null) = transaction {
-        val record = checkNotNull(active()) { "没有进行中的记录" }
-        check(expectedVersion == null || record.optString("version") == expectedVersion) { "任务已由其他设备更新，请核对后重试" }
+    /** 点击后只执行已展示的动作。各写入事务自行核对空闲状态或活动记录的编号、版本。 */
+    fun applyTimerAction(action: TimerAction, ledgerId: String, task: String, tag: String) {
+        when (action) {
+            TimerAction.Start -> start(ledgerId, task, tag)
+            is TimerAction.Finish -> finish(expectedVersion = action.version, expectedId = action.id, requireFocus = true)
+            is TimerAction.Resume -> resumeFocus(System.currentTimeMillis(), action.version, action.id)
+        }
+    }
+
+    fun finish(ended: Long = System.currentTimeMillis(), expectedVersion: String? = null, expectedId: String? = null, requireFocus: Boolean = false) = transaction {
+        val record = timerTarget(expectedVersion, expectedId)
+        check(!requireFocus || !isDistracted(record)) { "计时阶段已更新，请核对页面后再操作" }
         if (record.has("segments")) { val parts = record.getJSONArray("segments"); parts.getJSONObject(parts.length()-1).put("ended", ended) }
         record.put("ended", ended); validateRecord(record); save("record", record)
+    }
+
+    /** 只供计时写入事务调用，核对和保存之间不允许同步线程切换活动记录。 */
+    private fun timerTarget(expectedVersion: String?, expectedId: String?): JSONObject {
+        val record = checkNotNull(active()) { "没有进行中的记录，请核对页面后再操作" }
+        check((expectedId == null || record.getString("id") == expectedId) &&
+              (expectedVersion == null || record.getString("version") == expectedVersion)) {
+            "任务已更新，请核对页面后再操作"
+        }
+        return record
     }
     fun edit(id: String?, ledgerId: String, task: String, started: Long, ended: Long, expectedVersion: String? = null, tag: String? = null) = transaction {
         idle(); liveLedger(ledgerId)
@@ -151,9 +186,9 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
         record.put("segments", JSONArray(parts + next)); validateTransition(record); save("record", record)
     }
     /** 同一时间点结束分心并恢复原任务，版本检查阻止重复恢复和过期按钮操作。 */
-    fun resumeFocus(now: Long, expectedVersion: String) = transaction {
-        val record = checkNotNull(active()); check(isDistracted(record)) { "当前没有可结束的分心" }
-        check(record.optString("version") == expectedVersion) { "任务已由其他设备更新，请核对后重试" }
+    fun resumeFocus(now: Long, expectedVersion: String, expectedId: String? = null) = transaction {
+        val record = timerTarget(expectedVersion, expectedId)
+        check(isDistracted(record)) { "当前没有可结束的分心" }
         val parts = taskSegments(record); parts.last().put("ended", now)
         record.put("segments", JSONArray(parts + JSONObject().put("kind", "focus").put("started", now).put("ended", JSONObject.NULL)))
         validateTransition(record); save("record", record)
