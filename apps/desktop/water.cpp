@@ -139,6 +139,23 @@ QJsonObject command(QString kind, QJsonObject fields = {})
     return fields;
 }
 
+/**
+ * 旧版本可能把备份扩展字段放进恢复水壶命令，服务端会因未知字段拒绝整批。
+ * 发送时仅剔除协议从未接收的字段，保留原操作编号、时间和已知字段原值。
+ * 已确认但回执未到的合法命令仍可按原内容重试，后续依赖该编号的操作也无需重写。
+ */
+QJsonObject waterWireCommand(const QJsonObject &operation)
+{
+    if (operation["kind"] != "restore-bottle") return operation;
+    static const QSet<QString> protocolFields{"id","kind","at","base","target","ml","from","capacity","entry","voided"};
+    QJsonObject result;
+    for (auto field = operation.begin(); field != operation.end(); ++field) {
+        // 服务端 JSON 解码允许字段名大小写变化，因此必须保留旧队列中有效的别名。
+        if (protocolFields.contains(field.key().toCaseFolded())) result.insert(field.key(), field.value());
+    }
+    return result;
+}
+
 /** 相同备份内容跨端生成同一编号，重复导入即使存在差异也只保留一份核对记录。 */
 QString restoreId(const QJsonObject &c)
 {
@@ -194,7 +211,10 @@ void Store::waterSubmit(QJsonObject fields)
 QJsonObject Store::waterRequest(const QString &serverId) const
 {
     const auto data = waterData(); QJsonArray operations;
-    for (const auto &op : data["pending"].toArray()) { if (operations.size() == 50) break; operations.append(op); }
+    for (const auto &op : data["pending"].toArray()) {
+        if (operations.size() == 50) break;
+        operations.append(waterWireCommand(op.toObject()));
+    }
     return {{"serverId",serverId},{"cursor",data["cursor"].toInteger()},{"operations",operations}};
 }
 
@@ -250,7 +270,8 @@ void Store::waterImport(const QJsonObject &backup)
         };
         const auto initial = visible["entries"].toObject(); const auto bottle = backup["bottle"].toObject();
         if (!bottle.isEmpty()) {
-            const auto restore = command("restore-bottle",bottle);
+            // 备份格式可携带额外元数据，恢复只需要已知容量与实际剩余量。
+            const auto restore = command("restore-bottle", {{"capacity",bottle["capacity"]},{"ml",bottle["ml"]}});
             const auto result = preview({},restore);
             if (visible["bottle"].toObject().isEmpty()) restoreChange(restore,result);
         }
