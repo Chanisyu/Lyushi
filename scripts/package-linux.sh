@@ -4,9 +4,11 @@
 set -euo pipefail
 project_dir=$(cd -- "$(dirname -- "$0")/.." && pwd)
 build_dir="$project_dir/build/desktop-linux"
-version=0.8.1
 arch=$(dpkg --print-architecture)
 cmake -S "$project_dir/apps/desktop" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=Release
+# 使用 CMake 输出的版本，同时核对软件包名称所需的三段数字格式。
+version=$(<"$build_dir/lyushi-version.txt")
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf '无效的桌面端版本：%s\n' "$version" >&2; exit 1; }
 cmake --build "$build_dir" --parallel 2
 mkdir -p "$project_dir/build" "$project_dir/dist"
 # 使用唯一目录避免覆盖已有暂存文件；目录保留，便于核对打包内容。

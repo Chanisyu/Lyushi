@@ -408,8 +408,13 @@ func (s *Service) handler() http.Handler { return s.accountHandler() }
 func main() {
 	os.Exit(run())
 }
+
+// 发布脚本在链接时写入正式版本号。源码直接构建保留开发标识，便于区分未发布的二进制。
+var releaseVersion = "development"
+
 func run() int {
 	flags := flag.NewFlagSet("lyushi-server", flag.ContinueOnError)
+	version := flags.Bool("version", false, "显示服务端版本")
 	dbPath := flags.String("db", "/var/lib/lyushi/sync.sqlite", "SQLite 数据文件")
 	listen := flags.String("listen", "127.0.0.1:8093", "回环监听地址")
 	create := flags.String("create-device", "", "创建具名设备")
@@ -425,6 +430,11 @@ func run() int {
 	backup := flags.String("backup", "", "在线一致性备份输出文件，必须尚不存在")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return 2
+	}
+	// 版本检查在打开 SQLite 前完成，支持无需访问业务目录的安装验收。
+	if *version {
+		fmt.Println("Lyushi Server", releaseVersion)
+		return 0
 	}
 	service, err := openService(*dbPath)
 	if err != nil {

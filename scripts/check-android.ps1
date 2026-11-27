@@ -17,7 +17,7 @@ if ($LASTEXITCODE -ne 0) { throw '安装测试 APK 失败' }
 & $adb -s $Serial shell run-as $package rm -f files/sync-store-result.json
 if (Test-Path -LiteralPath $reportPath) { Move-Item -LiteralPath $reportPath -Destination "$reportPath.previous" -Force }
 & $adb -s $Serial shell am start -W -n "$package/.MainActivity" --es test_action sync-store-test
-'Waiting for the new isolated protocol report...'
+'正在等待独立存储检查报告。'
 $report = $null
 for ($attempt = 0; $attempt -lt 90; $attempt++) {
     $text = (& $adb -s $Serial shell run-as $package cat files/sync-store-result.json 2>$null) -join "`n"
@@ -29,6 +29,6 @@ for ($attempt = 0; $attempt -lt 90; $attempt++) {
 }
 if (-not $report) { throw '等待安卓检查报告超时，未写入成功结果' }
 [System.IO.File]::WriteAllText($reportPath,$text,[System.Text.UTF8Encoding]::new($false))
-if (-not $report.passed -or $report.appVersion -ne '0.8.1') { throw '安卓当前版本的协议检查未通过' }
-Copy-Item -LiteralPath $apk -Destination (Join-Path $projectDirectory 'dist/lyushi-android-0.8.1-beta.apk') -Force
+# 调试构建只用于验收。正式安装包由独立的发布签名步骤生成。
+if (-not $report.passed -or $report.appVersion -ne '1.0.0' -or $report.versionCode -ne 11) { throw 'Android 正式版源码的存储检查未通过' }
 $report | ConvertTo-Json -Depth 4

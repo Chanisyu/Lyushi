@@ -501,7 +501,7 @@ static void selfTest(Store &store, const QString &directory)
 
 int main(int argc, char **argv)
 {
-    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion("0.8.1");
+    QApplication app(argc, argv); app.setOrganizationName("Lyushi"); app.setApplicationName("Lyushi"); app.setApplicationVersion(QStringLiteral(LYUSHI_VERSION));
     // 所有 Qt 窗口继承内置图案，Linux 桌面使用相同标识关联 lyushi.desktop。
     app.setWindowIcon(QIcon(QStringLiteral(":/branding/lyushi_icon.png")));
 #ifdef Q_OS_LINUX
@@ -555,7 +555,7 @@ int main(int argc, char **argv)
         if (mode == "--inspect") { writeFile(args.value(3), QJsonDocument(QJsonObject{{"tags", store.entities("tag", true)}, {"ledgers", store.entities("ledger", true)}, {"records", store.entities("record", true)}, {"conflicts", store.conflicts()}, {"pending", store.pendingCount()}}).toJson()); return 0; }
         // 本地依赖检查不访问网络、不读取设备密钥，可在整理后的安装包中直接执行。
         if (mode == "--capabilities") {
-            writeFile(args.value(3), QJsonDocument(QJsonObject{{"qt", qVersion()}, {"tls", QSslSocket::supportsSsl()}, {"tlsBackend", QSslSocket::activeBackend()}, {"tlsBackends", QJsonArray::fromStringList(QSslSocket::availableBackends())}}).toJson()); return QSslSocket::supportsSsl() ? 0 : 1;
+            writeFile(args.value(3), QJsonDocument(QJsonObject{{"appVersion", QCoreApplication::applicationVersion()}, {"qt", qVersion()}, {"tls", QSslSocket::supportsSsl()}, {"tlsBackend", QSslSocket::activeBackend()}, {"tlsBackends", QJsonArray::fromStringList(QSslSocket::availableBackends())}}).toJson()); return QSslSocket::supportsSsl() ? 0 : 1;
         }
         // 隔离测试和自动化入口仍通过领域方法修改，不能绕过记录期间限制或时间校验。
         if (mode == "--command") {

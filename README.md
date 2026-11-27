@@ -26,18 +26,20 @@
 
 ## 下载与版本
 
-[已发布版本](https://github.com/Chanisyu/Lyushi/releases) · [更新记录](CHANGELOG.md) · [English](README.en.md)
+[v1.0.0 正式版](https://github.com/Chanisyu/Lyushi/releases/tag/v1.0.0) · [全部版本](https://github.com/Chanisyu/Lyushi/releases) · [更新记录](CHANGELOG.md)
 
-当前源码版本为 **0.8.1**，同步协议为 **4**。已发布的 0.4.0 安装包不包含分心、多用户及记录期间编辑功能，也不能连接协议 4 服务端。0.8.1 可按下文从源码构建，生成文件如下：
+柳时 **1.0.0** 支持单机使用和自托管同步。时间账本使用协议 **4**，饮水使用协议 **1**。如需启用网页后台与设备同步，请下载 Linux 服务端并完成部署。
 
-| 平台 | 文件 | 使用方式 |
+| 平台 | 下载 | 使用方式 |
 | --- | --- | --- |
-| Windows 11 x64 | `lyushi-windows-0.8.1-beta.zip` | 完整解压，运行 `Lyushi-0.8.1/lyushi.exe`，保留同目录运行库 |
-| Android | `lyushi-android-0.8.1-beta.apk` | 在系统文件管理器安装；当前采用调试签名 |
-| Ubuntu 26.04 LTS amd64 | `lyushi_0.8.1_amd64.deb` | 执行 `sudo apt install ./lyushi_0.8.1_amd64.deb` |
-| Linux amd64 服务端 | `lyushi-server-linux-amd64` | 配合 `deploy/` 中的 systemd 与 Caddy 配置部署 |
+| Windows 11 x64 | [Windows ZIP](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/lyushi-windows-1.0.0-x64.zip) | 完整解压，运行 `Lyushi-1.0.0/lyushi.exe`，保留同目录运行库 |
+| Android 8.0 及以上 | [Android APK](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/lyushi-android-1.0.0.apk) | 在系统文件管理器中打开 APK 并安装 |
+| Ubuntu 26.04 LTS amd64 | [Ubuntu DEB](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/lyushi_1.0.0_amd64.deb) | 执行 `sudo apt install ./lyushi_1.0.0_amd64.deb` |
+| Linux amd64 服务端 | [服务端 ZIP](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/lyushi-server-1.0.0-linux-amd64.zip) | 解压后参阅[服务器部署](#服务器部署) |
 
-构建产物位于 `dist/`，不纳入源码版本控制。Android 最低要求为 Android 8.0（API 26），当前验证环境为 Android 17。不同签名的 APK 通常不能直接覆盖安装；迁移前应导出 JSON 备份。桌面数据与程序文件分别保存，替换安装包不应覆盖数据目录。
+下载文件的校验值见 [SHA256SUMS.txt](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/SHA256SUMS.txt)。本地构建产物位于 `dist/` 或相应平台的构建输出目录。
+
+**Android 预览版迁移。** 正式版使用专用发布签名。安装前请结束计时，分别导出时间账本 JSON 和饮水 JSON。使用同步的账户还应确认待同步操作已上传。卸载调试签名的预览版后安装正式版，再恢复本机备份或重新连接已同步账户。卸载会清除旧应用的本机数据及本机保存的设备密钥。
 
 ## 功能
 
@@ -142,16 +144,16 @@ CSV 每个专注或分心区间各占一行，同一任务共用记录编号，�
 
 ### 安装与初始化
 
-以下命令用于全新目录。已有单用户或多用户数据时，应使用后文升级流程。
+解压服务端 ZIP 后，在解压目录执行以下命令。服务单元和 Caddy 示例位于压缩包根目录。已有单用户或多用户数据时，请使用下文的升级流程。
 
 ```bash
 sudo useradd --system --home-dir /var/lib/lyushi --shell /usr/sbin/nologin lyushi
 sudo install -d -m 0755 /opt/lyushi
 sudo install -d -m 0700 -o lyushi -g lyushi /var/lib/lyushi
-sudo install -m 0755 build/lyushi-server-linux-amd64 /opt/lyushi/lyushi-server
+sudo install -m 0755 lyushi-server /opt/lyushi/lyushi-server
 sudo -u lyushi /opt/lyushi/lyushi-server --db /var/lib/lyushi/sync.sqlite \
   --init-admin --password-file /var/lib/lyushi/admin-initial-password.txt
-sudo install -m 0644 deploy/lyushi.service /etc/systemd/system/lyushi.service
+sudo install -m 0644 lyushi.service /etc/systemd/system/lyushi.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now lyushi
 curl --fail http://127.0.0.1:8093/health
@@ -176,9 +178,9 @@ sudo -u lyushi /opt/lyushi/lyushi-server --db /var/lib/lyushi/sync.sqlite \
 
 已运行多用户服务的常规更新使用 `deploy/upgrade-server.sh`，不会重新初始化账户。升级前生成包含全部用户数据库的完整 ZIP 备份，更新后核对身份、设备归属及历史，失败回退程序。
 
-### 启用 0.8.0 饮水同步
+### 升级至 1.0.0
 
-使用 `deploy/upgrade-server.sh` 对现有协议 4 服务进行常规升级。健康检查返回 `waterProtocol=1` 表示可同步饮水。0.8.0 起的客户端复用原账户地址和设备密钥。原同步协议及时间账本备份格式保持兼容，服务端的完整 ZIP 同时保留饮水数据。
+在现有协议 4 服务的默认部署环境中，解压服务端 ZIP 后执行 `sudo bash ./upgrade-server.sh "$PWD"`。脚本备份现有数据库和服务文件，升级后核对账户归属、设备及历史数据。升级成功后健康检查应返回 `protocol=4` 和 `waterProtocol=1`。时间账本 JSON 备份格式保持为 **3**。
 
 ## 同步、备份与恢复
 
@@ -255,7 +257,7 @@ cmake --build build/desktop-linux --parallel 2
 gradle -p apps/android :app:assembleDebug --console=plain
 ```
 
-输出为 `apps/android/app/build/outputs/apk/debug/app-debug.apk`。仓库当前未附 Gradle Wrapper，需自行安装匹配版本 Gradle，或通过 Android Studio 配置对应版本。发布签名和密钥文件不得提交。
+输出为 `apps/android/app/build/outputs/apk/debug/app-debug.apk`。仓库当前未附 Gradle Wrapper，可安装匹配版本 Gradle，或通过 Android Studio 配置。发布构建使用 `:app:assembleRelease`，使用私有签名密钥签署 APK。签名密钥和密码应保存在仓库外。
 
 ### 服务端交叉构建
 
@@ -267,7 +269,7 @@ cd server
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o ../build/lyushi-server-linux-amd64 .
 ```
 
-Windows 开发者可在 PowerShell 中设置同名环境变量后执行 `go build`。`scripts/package-server.ps1 -GoExecutable <go.exe路径>` 收集 Go 依赖许可证并整理已经构建的 Linux 服务文件；运行前须生成 `build/lyushi-server-linux-amd64`。
+在 Windows 上执行 `./scripts/package-server.ps1 -GoExecutable <go.exe路径> -Version 1.0.0` 可交叉构建 Linux amd64 服务端。生成的 ZIP 同时包含部署配置、升级脚本及 Go 依赖许可证。
 
 ## 运行测试
 

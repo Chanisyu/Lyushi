@@ -20,24 +20,26 @@
 
 # Lyushi · 柳时
 
-Lyushi is a local-first time tracker for Android, Windows and Ubuntu. It provides separate ledgers, task tags, distraction intervals, task resumption, offline recording and self-hosted synchronization. Version **0.6.0** adds isolated user accounts and a web management console.
+Lyushi is a local-first time tracker for Android, Windows and Ubuntu. It provides separate ledgers, task tags, distraction intervals, task resumption and water tracking. A self-hosted service offers synchronization, isolated user accounts and a web management console.
 
 The project's source and documentation use [Apache-2.0](LICENSE). Third-party components retain their licenses; see [Third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Downloads and compatibility
 
-[Published releases](https://github.com/Chanisyu/Lyushi/releases) · [Changelog](CHANGELOG.md) · [简体中文](README.md)
+[v1.0.0 stable release](https://github.com/Chanisyu/Lyushi/releases/tag/v1.0.0) · [All releases](https://github.com/Chanisyu/Lyushi/releases) · [Changelog](CHANGELOG.md)
 
-The current source version is **0.8.1**, requiring synchronization protocol **4**. Published 0.4.0 packages do not contain distractions, multi-user functionality or active-task editing and cannot connect to a protocol 4 service. Build the current source to obtain:
+Lyushi **1.0.0** supports standalone use and self-hosted synchronization. Time ledgers use synchronization protocol **4**, and water tracking uses protocol **1**. Install the Linux server to enable device synchronization and the web console.
 
-| Platform | Artifact |
-| --- | --- |
-| Windows 11 x64 | `lyushi-windows-0.8.1-beta.zip`; extract all files and run `Lyushi-0.8.1/lyushi.exe` |
-| Android | `lyushi-android-0.8.1-beta.apk`, currently debug-signed |
-| Ubuntu 26.04 LTS amd64 | `lyushi_0.8.1_amd64.deb`; install with `sudo apt install ./lyushi_0.8.1_amd64.deb` |
-| Linux amd64 server | `lyushi-server-linux-amd64`, deployed using `deploy/` |
+| Platform | Download | Installation |
+| --- | --- | --- |
+| Windows 11 x64 | [Windows ZIP](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/lyushi-windows-1.0.0-x64.zip) | Extract the whole archive and run `Lyushi-1.0.0/lyushi.exe` |
+| Android 8.0 or later | [Android APK](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/lyushi-android-1.0.0.apk) | Open the APK in the system file manager to install it |
+| Ubuntu 26.04 LTS amd64 | [Ubuntu DEB](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/lyushi_1.0.0_amd64.deb) | Run `sudo apt install ./lyushi_1.0.0_amd64.deb` |
+| Linux amd64 server | [Server ZIP](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/lyushi-server-1.0.0-linux-amd64.zip) | Extract the archive and follow the server setup instructions below |
 
-Build artifacts are placed in `dist/` and excluded from version control. Android requires API 26 or later; Android 17 is the current test environment. Export JSON before changing APK signing certificates or replacing application data.
+Verify the downloads with [SHA256SUMS.txt](https://github.com/Chanisyu/Lyushi/releases/download/v1.0.0/SHA256SUMS.txt). Local build artifacts are generated in `dist/` or the platform's build output directory.
+
+**Migrating from Android previews.** The stable APK uses a dedicated release signing key. Finish any active timer and export your time ledger and water-tracking data as separate JSON files. If you use synchronization, confirm that your pending changes have reached the server. Uninstall the debug-signed preview, install the stable APK, then restore the local backups or reconnect the synchronized accounts. Uninstalling removes the old app's local data and stored device keys.
 
 ## Tracking and distractions
 
@@ -45,7 +47,7 @@ Create a ledger, enter an activity, optionally select a tag, and start tracking.
 
 While tracking, select **修改** (Edit) next to the activity to change its name and existing tag, then select **保存** (Save). Tracking continues while the form is open. Focus edits apply to all focus intervals of the same task; distraction edits apply only to the current distraction. Record identity, ledger, timestamps and interval boundaries remain unchanged. Tag creation and deletion remain available only while idle.
 
-If another device changes, stops or switches the task's phase, the editor retains its draft and disables stale saving. Android retains drafts across screen rotation, including the originally captured version; cancellation or a full exit discards unsaved input. See the [active-task editing specification](docs/active-task-editing.md) in Chinese. Version 0.7.0 remains compatible with the existing 0.6.0 server, protocol 4 and backup format 3; no server migration or configuration change is required.
+If another device changes, stops or switches the task's phase, the editor retains its draft and disables stale saving. Android retains drafts across screen rotation, including the originally captured version. Cancelling or fully exiting discards unsaved input. See the [active-task editing specification](docs/active-task-editing.md) in Chinese.
 
 Select “分心一下” to record a temporary distraction. The original task continues until the form is confirmed; cancellation makes no change. A blank name defaults to “分心”, with no tag. “结束分心并继续” immediately restores the original task and tag. “结束全部” finishes the whole task after confirmation. Repeated distractions are supported, with one nesting level.
 
@@ -93,16 +95,16 @@ Audit metadata is retained for 180 days without plaintext passwords or device ke
 
 The service uses Go and SQLite, binds to `127.0.0.1:8093`, and is exposed through Caddy HTTPS. Docker and a separate database server are unnecessary. Business data is readable by the server; end-to-end encryption is not provided.
 
-For a new deployment only:
+For a new deployment, extract the server ZIP and run the following commands from its root directory:
 
 ```bash
 sudo useradd --system --home-dir /var/lib/lyushi --shell /usr/sbin/nologin lyushi
 sudo install -d -m 0755 /opt/lyushi
 sudo install -d -m 0700 -o lyushi -g lyushi /var/lib/lyushi
-sudo install -m 0755 build/lyushi-server-linux-amd64 /opt/lyushi/lyushi-server
+sudo install -m 0755 lyushi-server /opt/lyushi/lyushi-server
 sudo -u lyushi /opt/lyushi/lyushi-server --db /var/lib/lyushi/sync.sqlite \
   --init-admin --password-file /var/lib/lyushi/admin-initial-password.txt
-sudo install -m 0644 deploy/lyushi.service /etc/systemd/system/lyushi.service
+sudo install -m 0644 lyushi.service /etc/systemd/system/lyushi.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now lyushi
 ```
@@ -120,9 +122,9 @@ sudo -u lyushi /opt/lyushi/lyushi-server --db /var/lib/lyushi/sync.sqlite \
 
 ## Upgrades and backups
 
-The server and all clients must be upgraded together. `deploy/upgrade-multiuser.sh` performs a one-time **blank initialization** from protocol 3: it creates a rollback backup, clears legacy business data and devices, creates an empty administrator and configures the console. Export legacy JSON first if it must be retained, then explicitly import it into the intended new account. The script refuses to reset an initialized protocol 4 service.
+When migrating from protocol 3, update the server and all clients together. `deploy/upgrade-multiuser.sh` performs a one-time **blank initialization** from protocol 3: it creates a rollback backup, clears legacy business data and devices, creates an empty administrator and configures the console. Export legacy JSON first if it must be retained, then explicitly import it into the intended new account. The script refuses to reset an initialized protocol 4 service.
 
-Subsequent multi-user upgrades use `deploy/upgrade-server.sh`, preserving users, data and identities with a complete ZIP backup and integrity checks.
+For an existing protocol 4 deployment using the default service paths, extract the server ZIP and run `sudo bash ./upgrade-server.sh "$PWD"` from its root directory. The script backs up the service and databases, then verifies account ownership, devices and history. After the upgrade, the health endpoint should report `protocol=4` and `waterProtocol=1`.
 
 User JSON backups use format 3 and remain compatible with imports from formats 1 and 2. Merge imports retain conflicting content and do not restart archived timers or automatically revive deleted entries. Native import limits are 32 MiB; the web limit is 8 MiB. CSV contains one row per interval, including a shared task ID, interval index and type; filter by “专注” for effective time.
 
@@ -190,7 +192,7 @@ Install the JDK, Gradle, and Android SDK versions listed above, set `ANDROID_HOM
 gradle -p apps/android :app:assembleDebug --console=plain
 ```
 
-The output is `apps/android/app/build/outputs/apk/debug/app-debug.apk`. A Gradle Wrapper is not currently included; install a matching Gradle version or configure it through Android Studio. Do not commit release signing keys or their configuration secrets.
+The output is `apps/android/app/build/outputs/apk/debug/app-debug.apk`. Install the matching Gradle version or configure it through Android Studio. Use `:app:assembleRelease` for the release build and sign the APK with a private release key. Store signing keys and passwords outside the repository.
 
 ### Cross-compile the server
 
@@ -202,7 +204,7 @@ cd server
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o ../build/lyushi-server-linux-amd64 .
 ```
 
-Windows developers can set the same environment variables in PowerShell before running `go build`. `scripts/package-server.ps1 -GoExecutable <path-to-go.exe>` collects Go dependency licenses and packages an existing Linux server build. Generate `build/lyushi-server-linux-amd64` before running it.
+On Windows, run `./scripts/package-server.ps1 -GoExecutable <path-to-go.exe> -Version 1.0.0` to cross-compile and package the Linux amd64 server. The ZIP includes deployment configuration, the upgrade script and licenses for the linked Go dependencies.
 
 ## Water tracking
 

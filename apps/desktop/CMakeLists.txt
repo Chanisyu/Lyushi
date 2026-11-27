@@ -1,11 +1,14 @@
 # 桌面应用只使用系统窗口与 SQLite；Windows 和 Ubuntu 共用此构建入口。
 cmake_minimum_required(VERSION 3.22)
-project(Lyushi VERSION 0.8.1 LANGUAGES CXX)
+project(Lyushi VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Sql Network)
 qt_add_executable(lyushi WIN32 main.cpp profiles.cpp store.cpp focus.cpp focuschecks.cpp activemetadata-checks.cpp syncstore.cpp syncclient.cpp water.cpp waterui.cpp)
 target_link_libraries(lyushi PRIVATE Qt6::Widgets Qt6::Sql Qt6::Network)
+# 同一版本用于应用设置及两平台安装包。配置时输出纯文本供打包脚本读取。
+target_compile_definitions(lyushi PRIVATE LYUSHI_VERSION="${PROJECT_VERSION}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/lyushi-version.txt" "${PROJECT_VERSION}\n")
 # 共享 PNG 嵌入 Qt 程序，解压运行时无需寻找外部图标文件。
 set(lyushi_branding "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/branding")
 set(lyushi_icon_dir "${lyushi_branding}/res/drawable-nodpi")
