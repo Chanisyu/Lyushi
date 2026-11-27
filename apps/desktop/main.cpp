@@ -150,7 +150,7 @@ class Window : public QWidget {
         if (dialog.exec() == QDialog::Accepted) { reload(); sync.request(); }
     }
     /** 新建和修改共用毫秒精度的北京时间表单，避免只改文字时截断区间边界；保存校验在存储层再次执行。 */
-    void edit(QWidget *owner, const QJsonObject &record = {}, int segment = -1)
+    void edit(QWidget *owner, const QString &ledgerId, const QJsonObject &record = {}, int segment = -1)
     {
         QDialog dialog(owner); dialog.setWindowTitle(record.isEmpty() ? QStringLiteral("补记") : QStringLiteral("修改记录"));
         const auto display = segment < 0 ? record : segmentRecord(record, segment);
@@ -168,7 +168,8 @@ class Window : public QWidget {
         connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] { safely(&dialog, [&] {
             if (segment >= 0) store.editSegment(record["id"].toString(), segment, text.toPlainText(), tagChoice.currentData().toString(), begin.dateTime().toMSecsSinceEpoch(), end.dateTime().toMSecsSinceEpoch(), record["version"].toString());
-            else store.editRecord(record["id"].toString(), selected, text.toPlainText(), begin.dateTime().toMSecsSinceEpoch(), end.dateTime().toMSecsSinceEpoch(), record["version"].toString(), tagChoice.currentData().toString()); dialog.accept(); }); });
+            // 表单使用所属明细的账本编号；同步刷新后的主窗口选项不能作为写入目标。
+            else store.editRecord(record["id"].toString(), ledgerId, text.toPlainText(), begin.dateTime().toMSecsSinceEpoch(), end.dateTime().toMSecsSinceEpoch(), record["version"].toString(), tagChoice.currentData().toString()); dialog.accept(); }); });
         dialog.exec();
     }
     /** 展开主任务的时间区间，不额外插入汇总行参与时长统计。 */
@@ -186,7 +187,7 @@ class Window : public QWidget {
                 for (int c=0;c<values.size();++c) table.setItem(i,c,new QTableWidgetItem(values[c]));
             } table.resizeColumnsToContents(); };
         QPushButton modify(QStringLiteral("修改所选区间")); layout.addWidget(&modify);
-        connect(&modify,&QPushButton::clicked,&dialog,[&] { safely(&dialog,[&] { ensure(table.currentRow()>=0,QStringLiteral("请先选择区间")); edit(&dialog,current,table.currentRow()); fill(); }); });
+        connect(&modify,&QPushButton::clicked,&dialog,[&] { safely(&dialog,[&] { ensure(table.currentRow()>=0,QStringLiteral("请先选择区间")); edit(&dialog,current["ledgerId"].toString(),current,table.currentRow()); fill(); }); });
         fill(); dialog.exec();
     }
     /** 冲突中的原始版本以只读方式展示，第一版不擅自决定用哪一方覆盖。 */
@@ -212,7 +213,7 @@ class Window : public QWidget {
         QDialogButtonBox buttons(QDialogButtonBox::Close); layout.addWidget(&buttons); connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); dialog.exec();
     }
     /** 文件入口只在非记录时开放；读取有体积上限，导入前确认范围与保留规则。 */
-    void fileAction(QWidget *owner, int mode)
+    void fileAction(QWidget *owner, int mode, const QString &ledgerId = {})
     {
         ensure(store.active().isEmpty(), QStringLiteral("请先结束记录"));
         if (mode == 0) {
@@ -226,8 +227,13 @@ class Window : public QWidget {
                 .arg(result["added"].toInt()).arg(result["duplicate"].toInt()).arg(result["conflicts"].toInt()));
         } else {
             const bool json = mode == 1;
+            // 单账本模式须有明确编号，不能把缺失编号解释为导出全部账本。
+            if (mode == 2) {
+                ensure(!ledgerId.isEmpty(), QStringLiteral("请重新选择导出的账本"));
+                store.liveLedger(ledgerId);
+            }
             const auto path = QFileDialog::getSaveFileName(owner, QStringLiteral("导出"), json ? "柳时备份.json" : "时间记录.csv", json ? "JSON (*.json)" : "CSV (*.csv)"); if (path.isEmpty()) return;
-            writeFile(path, json ? QJsonDocument(store.backup()).toJson() : store.csv(mode == 2 ? selected : QString{}).toUtf8());
+            writeFile(path, json ? QJsonDocument(store.backup()).toJson() : store.csv(mode == 2 ? ledgerId : QString{}).toUtf8());
             QMessageBox::information(owner, QStringLiteral("导出完成"), QStringLiteral("文件已保存。"));
         }
     }
@@ -235,14 +241,17 @@ class Window : public QWidget {
     void showDetails()
     {
         if (!store.active().isEmpty()) return;
-        QDialog dialog(this); dialog.setWindowTitle(ledgers->currentText()); dialog.resize(780, 540); QVBoxLayout layout(&dialog);
+        // 明细生命周期固定账本编号；模态窗口的事件循环内，后台同步仍可能重选主窗口账本。
+        const auto ledgerId = selected;
+        QDialog dialog(this); dialog.resize(780, 540); QVBoxLayout layout(&dialog);
         QTableWidget table; table.setColumnCount(5); table.setHorizontalHeaderLabels({QStringLiteral("事项"), QStringLiteral("开始"), QStringLiteral("结束"), QStringLiteral("有效时长"), QStringLiteral("标签")});
         table.setSelectionBehavior(QAbstractItemView::SelectRows); table.setSelectionMode(QAbstractItemView::SingleSelection); table.setEditTriggers(QAbstractItemView::NoEditTriggers);
         table.horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents); table.horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch); layout.addWidget(&table);
         QJsonArray records;
         auto fill = [&] {
+            dialog.setWindowTitle(store.liveLedger(ledgerId)["name"].toString());
             records = {}; QList<QJsonObject> sorted;
-            for (const auto &value : store.entities("record")) if (value.toObject()["ledgerId"].toString() == selected) sorted.append(value.toObject());
+            for (const auto &value : store.entities("record")) if (value.toObject()["ledgerId"].toString() == ledgerId) sorted.append(value.toObject());
             std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a["started"].toInteger() > b["started"].toInteger(); });
             table.setRowCount(sorted.size()); int row = 0;
             for (const auto &record : sorted) { records.append(record);
@@ -252,17 +261,27 @@ class Window : public QWidget {
         auto chosen = [&] { ensure(table.currentRow() >= 0, QStringLiteral("请先选择一条记录")); return records.at(table.currentRow()).toObject(); };
         auto *row = new QHBoxLayout; layout.addLayout(row);
         auto button = [&](const QString &text, const std::function<void()> &callback) { auto *b = new QPushButton(text); row->addWidget(b); connect(b, &QPushButton::clicked, &dialog, [&, callback] { safely(&dialog, callback); }); };
-        button(QStringLiteral("补记"), [&] { edit(&dialog); fill(); });
+        button(QStringLiteral("补记"), [&] { store.liveLedger(ledgerId); edit(&dialog,ledgerId); fill(); });
         button(QStringLiteral("查看分段"), [&] { showSegments(&dialog, chosen()["id"].toString()); fill(); });
-        button(QStringLiteral("修改"), [&] { edit(&dialog, chosen()); fill(); });
+        button(QStringLiteral("修改"), [&] { edit(&dialog, ledgerId, chosen()); fill(); });
         button(QStringLiteral("删除记录"), [&] { const auto record = chosen(); if (QMessageBox::question(&dialog, QStringLiteral("删除记录"), record["task"].toString() + QStringLiteral("\n确认删除整个任务及全部专注、分心区间？")) == QMessageBox::Yes) { store.deleteRecord(record["id"].toString()); fill(); } });
-        button(QStringLiteral("改名"), [&] { bool ok; const auto name = QInputDialog::getText(&dialog, QStringLiteral("账本改名"), QStringLiteral("账本名称"), QLineEdit::Normal, ledgers->currentText(), &ok); if (ok) { store.renameLedger(selected, name); reload(); dialog.setWindowTitle(ledgers->currentText()); } });
-        button(QStringLiteral("删除账本"), [&] { bool ok; const auto name = ledgers->currentText(); const auto answer = QInputDialog::getText(&dialog, QStringLiteral("删除整个账本"), QStringLiteral("将删除 %1 条记录。输入账本名“%2”确认：").arg(records.size()).arg(name), QLineEdit::Normal, {}, &ok);
-            if (ok) { ensure(answer == name, QStringLiteral("名称不一致，未删除")); store.deleteLedger(selected); dialog.accept(); } });
+        button(QStringLiteral("改名"), [&] {
+            const auto ledger = store.liveLedger(ledgerId); bool ok;
+            const auto name = QInputDialog::getText(&dialog, QStringLiteral("账本改名"), QStringLiteral("账本名称"), QLineEdit::Normal, ledger["name"].toString(), &ok);
+            if (ok) { store.renameLedger(ledgerId, name, ledger["version"].toString()); reload(); fill(); }
+        });
+        button(QStringLiteral("删除账本"), [&] {
+            const auto ledger = store.liveLedger(ledgerId); bool ok; const auto name = ledger["name"].toString();
+            const auto answer = QInputDialog::getText(&dialog, QStringLiteral("删除整个账本"), QStringLiteral("将删除该账本及其全部记录。输入账本名“%1”确认：").arg(name), QLineEdit::Normal, {}, &ok);
+            if (ok) {
+                ensure(answer == name, QStringLiteral("名称不一致，未删除"));
+                store.deleteLedger(ledgerId, ledger["version"].toString()); dialog.accept();
+            }
+        });
         auto *files = new QHBoxLayout; layout.addLayout(files); row = files;
         button(QStringLiteral("导入 JSON"), [&] { fileAction(&dialog, 0); reload(); fill(); });
         button(QStringLiteral("备份全部 JSON"), [&] { fileAction(&dialog, 1); });
-        button(QStringLiteral("导出本账本 CSV"), [&] { fileAction(&dialog, 2); });
+        button(QStringLiteral("导出本账本 CSV"), [&] { fileAction(&dialog, 2, ledgerId); });
         button(QStringLiteral("导出全部 CSV"), [&] { fileAction(&dialog, 3); });
         button(QStringLiteral("查看冲突"), [&] { showConflicts(&dialog); });
         fill(); dialog.exec(); reload();
@@ -394,6 +413,27 @@ static void selfTest(Store &store, const QString &directory)
 {
     focusSelfTest(directory);
     activeMetadataSelfTest(directory);
+    // 模拟提交确认期间原账本被重命名或删除，过期操作不能改变另一账本及其待上传记录。
+    {
+        Store books(QDir(directory).filePath("ledger-target-check"));
+        const auto a = books.addLedger("甲"), b = books.addLedger("乙");
+        books.editRecord({}, b, "只属于乙的任务", 1700000000000LL, 1700000001000LL);
+        const auto stale = books.liveLedger(a)["version"].toString();
+        books.renameLedger(a, "更新后的甲", stale);
+        const auto pending = books.pendingCount();
+        auto expectRejected = [](const std::function<void()> &attempt) {
+            bool rejected = false; try { attempt(); } catch (const std::exception &) { rejected = true; }
+            ensure(rejected, "stale ledger action unexpectedly succeeded");
+        };
+        expectRejected([&] { books.renameLedger(a, "过期改名", stale); });
+        expectRejected([&] { books.deleteLedger(a, stale); });
+        ensure(books.pendingCount() == pending && books.liveLedger(a)["name"] == "更新后的甲", "stale ledger action changed data");
+        books.deleteLedger(a, books.liveLedger(a)["version"].toString());
+        expectRejected([&] { books.deleteLedger(a); });
+        expectRejected([&] { books.editRecord({}, a, "过期补记", 1700000000000LL, 1700000001000LL); });
+        expectRejected([&] { books.csv(a); });
+        ensure(books.entities("record").size() == 1 && books.csv(b).contains("只属于乙的任务"), "another ledger was changed");
+    }
     { Store profiles(QDir(directory).filePath("profile-a")); profiles.addLedger("账户甲"); profiles.bindAccount(QString(64,'a'),QString(64,'1'));
       bool rejected=false;try{profiles.bindAccount(QString(64,'b'),QString(64,'2'));}catch(...){rejected=true;}ensure(rejected,"foreign account binding accepted");
       profiles.useDirectory(QDir(directory).filePath("profile-b"));ensure(profiles.entities("ledger").isEmpty(),"account data mixed");profiles.bindAccount(QString(64,'b'),QString(64,'2'));

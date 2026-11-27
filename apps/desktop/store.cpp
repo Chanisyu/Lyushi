@@ -168,6 +168,14 @@ QJsonObject Store::active() const
     return query.next() ? QJsonDocument::fromJson(query.value(0).toByteArray()).object() : QJsonObject{};
 }
 void Store::idle() const { ensure(active().isEmpty(), QStringLiteral("请先结束当前记录")); }
+QJsonObject Store::liveLedger(const QString &id, const QString &expectedVersion) const
+{
+    const auto ledger = find("ledger", id);
+    ensure(!ledger.isEmpty() && !ledger["deleted"].toBool(), QStringLiteral("此账本已不存在，请返回并重新选择"));
+    ensure(expectedVersion.isEmpty() || ledger["version"].toString() == expectedVersion,
+           QStringLiteral("此账本已更新，请重新打开明细后操作"));
+    return ledger;
+}
 QString Store::addLedger(const QString &name)
 {
     QString id = identity();
@@ -175,16 +183,17 @@ QString Store::addLedger(const QString &name)
         save("ledger", {{"id", id}, {"name", name.trimmed()}, {"deleted", false}, {"revision", 1}}); });
     return id;
 }
-void Store::renameLedger(const QString &id, const QString &name)
+void Store::renameLedger(const QString &id, const QString &name, const QString &expectedVersion)
 {
-    transaction([&] { idle(); auto ledger = find("ledger", id);
-        ensure(!ledger.isEmpty() && !ledger["deleted"].toBool(), QStringLiteral("账本不存在"));
+    // 事务内核对打开表单时的版本，同步改名后旧表单不能覆盖新名称。
+    transaction([&] { idle(); auto ledger = liveLedger(id, expectedVersion);
         ensure(!name.trimmed().isEmpty() && name.size() <= 200, QStringLiteral("请输入不超过 200 字的账本名"));
         ledger["name"] = name.trimmed(); save("ledger", ledger); });
 }
-void Store::deleteLedger(const QString &id)
+void Store::deleteLedger(const QString &id, const QString &expectedVersion)
 {
-    transaction([&] { idle(); auto ledger = find("ledger", id); ensure(!ledger.isEmpty(), QStringLiteral("账本不存在"));
+    // 核对确认对象后才生成账本及记录的删除操作，拒绝已删除或已更新的账本。
+    transaction([&] { idle(); auto ledger = liveLedger(id, expectedVersion);
         for (const auto &value : entities("record")) { auto record = value.toObject(); if (record["ledgerId"].toString() == id) { record["deleted"] = true; save("record", record); } }
         ledger["deleted"] = true; save("ledger", ledger); });
 }
@@ -228,8 +237,7 @@ void Store::finish(qint64 ended, const QString &expectedVersion)
 }
 void Store::editRecord(const QString &id, const QString &ledgerId, const QString &task, qint64 started, qint64 ended, const QString &expectedVersion, const QString &tag)
 {
-    transaction([&] { idle(); const auto ledger = find("ledger", ledgerId);
-        ensure(!ledger.isEmpty() && !ledger["deleted"].toBool(), QStringLiteral("账本不存在"));
+    transaction([&] { idle(); liveLedger(ledgerId);
         auto record = id.isEmpty() ? QJsonObject{{"id", identity()}, {"revision", 1}, {"deleted", false}} : find("record", id);
         ensure(!record.isEmpty() && !record["deleted"].toBool() && (id.isEmpty() || record["ledgerId"].toString() == ledgerId), QStringLiteral("记录不存在或不属于此账本"));
         ensure(expectedVersion.isEmpty() || record["version"].toString() == expectedVersion, QStringLiteral("记录已被另一设备更新，请保留输入并重新打开修改"));
@@ -313,7 +321,10 @@ QJsonObject Store::importBackup(const QJsonObject &data)
 /** CSV 所有字段统一引用与转义；公式起始字符加引号前缀，避免表格误执行事项内容。 */
 QString Store::csv(const QString &ledgerId) const
 {
-    idle(); auto quote = [](QString text) { if (!text.isEmpty() && QString("=+-@\t\r").contains(text.front())) text.prepend('\''); text.replace("\"", "\"\""); return "\"" + text + "\""; };
+    idle();
+    // 单账本导出在文件选择返回后再次校验原账本，已被同步删除时不生成文件。
+    if (!ledgerId.isEmpty()) liveLedger(ledgerId);
+    auto quote = [](QString text) { if (!text.isEmpty() && QString("=+-@\t\r").contains(text.front())) text.prepend('\''); text.replace("\"", "\"\""); return "\"" + text + "\""; };
     auto date = [](qint64 ms) { return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC).toOffsetFromUtc(28800).toString("yyyy-MM-dd HH:mm:ss.zzz"); };
     QString result = QString::fromUtf8("\xEF\xBB\xBF") + QStringLiteral("账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号,标签,区间序号,区间类型\r\n");
     for (const auto &value : entities("record")) {

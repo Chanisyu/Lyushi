@@ -17,6 +17,23 @@ internal fun runSyncChecks(context: Context): JSONObject {
         Store(context,"account-b-check.sqlite").use { other -> check(other.entities("ledger").isEmpty());other.bindAccount("b".repeat(64),"2".repeat(64)) }
         check(account.entities("ledger").size==1)
     }
+    // 模拟先打开甲的表单，再收到改名或删除；拒绝旧确认且保留乙及其记录。
+    context.deleteDatabase("ledger-target-check.sqlite")
+    Store(context,"ledger-target-check.sqlite").use { books ->
+        val a = books.addLedger("甲"); val b = books.addLedger("乙")
+        books.edit(null,b,"只属于乙的任务",1700000000000,1700000001000)
+        val stale = books.liveLedger(a).getString("version")
+        books.renameLedger(a,"更新后的甲",stale)
+        val pending = books.pendingCount()
+        check(runCatching { books.renameLedger(a,"过期改名",stale) }.isFailure)
+        check(runCatching { books.deleteLedger(a,stale) }.isFailure)
+        check(books.pendingCount() == pending && books.liveLedger(a).getString("name") == "更新后的甲")
+        books.deleteLedger(a,books.liveLedger(a).getString("version"))
+        check(runCatching { books.deleteLedger(a) }.isFailure)
+        check(runCatching { books.edit(null,a,"过期补记",1700000000000,1700000001000) }.isFailure)
+        check(runCatching { books.csv(a) }.isFailure)
+        check(books.entities("record").size == 1 && books.csv(b).contains("只属于乙的任务"))
+    }
     runFocusChecks(context)
     runActiveMetadataChecks(context)
     runWaterChecks(context)

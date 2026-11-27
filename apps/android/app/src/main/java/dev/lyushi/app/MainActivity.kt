@@ -62,7 +62,11 @@ class MainActivity : Activity() {
     private var selected = ""
     private var screen = "main"
     private var busy = false
-    private var fileMode = 0
+    /** 系统文件选择器可跨同步和旋转返回，操作范围独立于届时的主页面选择。 */
+    private data class LedgerFileRequest(val mode: Int, val profile: String, val ledgerId: String?) {
+        val requestCode: Int get() = if (mode == 0) 100 else 101
+    }
+    private var ledgerFileRequest: LedgerFileRequest? = null
     private var actionRecordAtPress: String? = null
     private var actionVersionAtPress: String? = null
     private lateinit var focusHint: TextView
@@ -80,7 +84,12 @@ class MainActivity : Activity() {
         if (activeEditorUiTest && savedInstanceState == null && intent.getStringExtra("test_action") == "active-editor-ui-test") {
             deleteDatabase("active-editor-ui-check.sqlite"); editorTestStage = 0
         }
-        loadedProfile=activeProfile(preferences); store = Store(this, if (activeEditorUiTest) "active-editor-ui-check.sqlite" else accountDatabase(loadedProfile)); preferences.registerOnSharedPreferenceChangeListener(profileListener); selected = preferences.getString("ledger."+activeProfile(preferences), "") ?: ""; fileMode = savedInstanceState?.getInt("fileMode") ?: 0
+        loadedProfile=activeProfile(preferences); store = Store(this, if (activeEditorUiTest) "active-editor-ui-check.sqlite" else accountDatabase(loadedProfile)); preferences.registerOnSharedPreferenceChangeListener(profileListener); selected = preferences.getString("ledger."+loadedProfile, "") ?: ""
+        savedInstanceState?.let { state ->
+            val mode = state.getInt("fileMode", -1)
+            val profile = state.getString("fileProfile")
+            if (profile != null && mode in 0..3) ledgerFileRequest = LedgerFileRequest(mode, profile, state.getString("fileLedgerId"))
+        }
         sync = SyncClient(applicationContext, store, preferences, worker, handler, { if (!isDestroyed) safely { waterDialog?.refresh() } }) { changed, reconnected ->
             if (!isDestroyed) safely {
                 if (changed && !busy) {
@@ -104,7 +113,11 @@ class MainActivity : Activity() {
     override fun onStart() { super.onStart(); handler.post(refresh) }
     override fun onStop() { handler.removeCallbacks(refresh); super.onStop() }
     override fun onSaveInstanceState(outState: Bundle) {
-        outState.putInt("fileMode", fileMode)
+        ledgerFileRequest?.let { request ->
+            outState.putInt("fileMode", request.mode)
+            outState.putString("fileProfile", request.profile)
+            outState.putString("fileLedgerId", request.ledgerId)
+        }
         captureActiveDraft()?.let { outState.putString("activeMetadataDraft", it.json()); outState.putString("activeDraftSession", draftSession) }
         super.onSaveInstanceState(outState)
     }
@@ -312,9 +325,9 @@ class MainActivity : Activity() {
         idle(); screen = "segments"; page("分段明细 · ${record.getString("task")}")
         taskSegments(record).forEachIndexed { index, segment ->
             val item = segmentRecord(record,index); val kind = if (segment.getString("kind") == "focus") "专注" else "分心"
-            root.addView(button("$kind · ${item.getString("task")}\n${dateText(item.getLong("started"))} → ${dateText(item.getLong("ended"))}\n${durationText(item.getLong("ended")-item.getLong("started"))} · ${item.optString("tag", "无标签")}") { edit(record,index) })
+            root.addView(button("$kind · ${item.getString("task")}\n${dateText(item.getLong("started"))} → ${dateText(item.getLong("ended"))}\n${durationText(item.getLong("ended")-item.getLong("started"))} · ${item.optString("tag", "无标签")}") { edit(record.getString("ledgerId"),record,index) })
         }
-        root.addView(button("返回账本明细") { showDetails() })
+        root.addView(button("返回账本明细") { showDetails(record.getString("ledgerId")) })
     }
     /** 下拉项与显示文字分离，已删除快照不会被误认为可供新任务使用的标签。 */
     private fun tagChoice(initial: String, keepHistorical: Boolean = false, snapshots: Set<String> = emptySet(), updateMainSelection: Boolean = true): Spinner {
@@ -355,30 +368,37 @@ class MainActivity : Activity() {
         val dialog = AlertDialog.Builder(this).setTitle(title).setView(input).setPositiveButton("保存", null).setNegativeButton("取消", null).create()
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { safely { idle(); save(input.text.toString()); dialog.dismiss() } } }; dialog.present()
     }
-    /** 账本明细按开始时间倒序；每个条目的操作始终引用稳定编号。 */
-    private fun showDetails() {
-        idle(); screen = "details"; val ledger = store.entities("ledger").first { it.getString("id") == selected }; page(ledger.getString("name"))
+    /** 明细绑定打开时的账本编号；同步刷新主页面后，已打开表单仍只指向该账本。 */
+    private fun showDetails(ledgerId: String = selected) {
+        idle(); val ledger = store.liveLedger(ledgerId); screen = "details"; page(ledger.getString("name"))
         root.addView(label("起止时间均为北京时间", 13f))
-        root.addView(button("补记") { idle(); edit(null) })
-        val records = store.entities("record").filter { it.getString("ledgerId") == selected }.sortedByDescending { it.getLong("started") }
+        root.addView(button("补记") { edit(ledgerId) })
+        val records = store.entities("record").filter { it.getString("ledgerId") == ledgerId }.sortedByDescending { it.getLong("started") }
         if (records.isEmpty()) root.addView(label("这个账本还没有记录。"))
         records.forEach { record -> root.addView(button(record.getString("task") + "\n" + dateText(record.getLong("started")) + " → " + dateText(record.getLong("ended")) + "\n" + durationText(focusDuration(record, record.getLong("ended"))) + "（有效时长）\n标签：" + record.optString("tag", "无标签")) {
             idle(); AlertDialog.Builder(this).setTitle(record.getString("task")).setItems(arrayOf("修改事项与标签", "查看分段", "删除任务")) { _, which -> safely {
-                if (which == 0) edit(record) else if (which == 1) showSegments(record) else AlertDialog.Builder(this).setTitle("删除记录").setMessage("确认删除整个任务及全部专注、分心区间？")
-                    .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> safely { idle(); store.deleteRecord(record.getString("id")); showDetails() } }.create().present()
+                if (which == 0) edit(ledgerId,record) else if (which == 1) showSegments(record) else AlertDialog.Builder(this).setTitle("删除记录").setMessage("确认删除整个任务及全部专注、分心区间？")
+                    .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> safely { idle(); store.deleteRecord(record.getString("id")); showDetails(ledgerId) } }.create().present()
             } }.create().present()
         }) }
-        root.addView(button("账本改名") { promptName("账本改名", ledger.getString("name")) { store.renameLedger(selected, it); showDetails() } })
-        root.addView(button("删除整个账本") { idle(); val input = EditText(this); val name = ledger.getString("name")
-            AlertDialog.Builder(this).setTitle("删除整个账本").setMessage("将删除 ${records.size} 条记录。输入账本名“$name”确认：").setView(input)
-                .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> safely { idle(); check(input.text.toString() == name) { "名称不一致，未删除" }; store.deleteLedger(selected); showMain() } }.create().present()
+        root.addView(button("账本改名") {
+            idle(); val current = store.liveLedger(ledgerId)
+            promptName("账本改名", current.getString("name")) { store.renameLedger(ledgerId, it, current.getString("version")); showDetails(ledgerId) }
         })
-        root.addView(button("备份全部 JSON") { chooseFile(1) }); root.addView(button("导出本账本 CSV") { chooseFile(2) }); root.addView(button("导出全部 CSV") { chooseFile(3) })
+        root.addView(button("删除整个账本") {
+            idle(); val input = EditText(this); val current = store.liveLedger(ledgerId); val name = current.getString("name")
+            AlertDialog.Builder(this).setTitle("删除整个账本").setMessage("将删除该账本及其全部记录。输入账本名“$name”确认：").setView(input)
+                .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> safely {
+                    idle(); check(input.text.toString() == name) { "名称不一致，未删除" }
+                    store.deleteLedger(ledgerId, current.getString("version")); showMain()
+                } }.create().present()
+        })
+        root.addView(button("备份全部 JSON") { chooseFile(1) }); root.addView(button("导出本账本 CSV") { chooseFile(2, ledgerId) }); root.addView(button("导出全部 CSV") { chooseFile(3) })
         root.addView(button("导入 JSON") { chooseFile(0) }); root.addView(button("查看已保留的导入冲突") { showConflicts() }); root.addView(button("返回") { showMain() })
     }
     /** 表单保留精确输入渠道，严格解析日期，避免把不存在的日期自动修正。 */
-    private fun edit(record: JSONObject?, segment: Int = -1) {
-        idle(); val fields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 0, 24, 0) }
+    private fun edit(ledgerId: String, record: JSONObject? = null, segment: Int = -1) {
+        idle(); store.liveLedger(ledgerId); val fields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 0, 24, 0) }
         val display = if (record == null || segment < 0) record else segmentRecord(record,segment)
         val taskInput = EditText(this).apply { hint = "事项"; setText(display?.getString("task") ?: "") }; fields.addView(taskInput)
         fields.addView(label("标签", 14f)); val recordTag = tagChoice(display?.optString("tag") ?: "", true); fields.addView(recordTag)
@@ -391,7 +411,7 @@ class MainActivity : Activity() {
             idle(); val format = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSS").withResolverStyle(ResolverStyle.STRICT)
             fun parse(input: EditText) = LocalDateTime.parse(input.text.toString(), format).toInstant(ZoneOffset.ofHours(8)).toEpochMilli()
             if (segment >= 0) store.editSegment(record!!.getString("id"), segment, taskInput.text.toString(), chosenTag(recordTag), parse(begin), parse(end), record.getString("version"))
-            else store.edit(record?.getString("id"), selected, taskInput.text.toString(), parse(begin), parse(end), record?.optString("version"), chosenTag(recordTag)); dialog.dismiss(); if (segment >= 0) showSegments(store.find("record", record!!.getString("id"))!!) else showDetails()
+            else store.edit(record?.getString("id"), ledgerId, taskInput.text.toString(), parse(begin), parse(end), record?.optString("version"), chosenTag(recordTag)); dialog.dismiss(); if (segment >= 0) showSegments(store.find("record", record!!.getString("id"))!!) else showDetails(ledgerId)
         } } }; dialog.present()
     }
     /** 冲突只读展示双方保留策略；完整导入版本也会随 JSON 备份导出。 */
@@ -457,10 +477,13 @@ class MainActivity : Activity() {
         root.addView(button("返回") { check(!busy) { "正在验证账户" };showMain() })
     }
     /** Android 文件选择器授予单文件访问权；取消选择不修改数据。 */
-    private fun chooseFile(mode: Int) {
-        idle(); fileMode = mode
-        if (mode == 0) startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*" }, 100)
-        else startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = if (mode == 1) "application/json" else "text/csv"; putExtra(Intent.EXTRA_TITLE, if (mode == 1) "柳时备份.json" else "时间记录.csv") }, 101)
+    private fun chooseFile(mode: Int, ledgerId: String? = null) {
+        idle()
+        if (mode == 2) store.liveLedger(checkNotNull(ledgerId) { "请重新选择导出的账本" })
+        val request = LedgerFileRequest(mode, loadedProfile, ledgerId)
+        ledgerFileRequest = request
+        if (mode == 0) startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*" }, request.requestCode)
+        else startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = if (mode == 1) "application/json" else "text/csv"; putExtra(Intent.EXTRA_TITLE, if (mode == 1) "柳时备份.json" else "时间记录.csv") }, request.requestCode)
     }
     /** 文件操作占用独立线程；完整校验失败时数据库回滚且返回可读错误。 */
     private fun fileWork(block: () -> String) {
@@ -477,10 +500,16 @@ class MainActivity : Activity() {
             if (resultCode == RESULT_OK) data?.data?.let { transferWaterFile(requestCode-110,it) }
             return
         }
+        if (requestCode !in 100..101) return
+        val request = ledgerFileRequest?.takeIf { it.requestCode == requestCode }
+        ledgerFileRequest = null
         if (resultCode != RESULT_OK || data?.data == null) return
         val uri = data.data!!
         safely {
             idle()
+            check(request != null && request.profile == loadedProfile && request.profile == activeProfile(preferences)) {
+                "文件操作的账户或账本未能确认，请重新开始"
+            }
             if (requestCode == 100) AlertDialog.Builder(this).setTitle("合并导入").setMessage("相同内容去重，不同版本另存为冲突，不覆盖本机。继续？").setNegativeButton("取消", null)
                 .setPositiveButton("导入") { _, _ -> fileWork {
                     val bytes = contentResolver.openInputStream(uri)!!.use { input ->
@@ -489,8 +518,12 @@ class MainActivity : Activity() {
                     }
                     val result = store.importBackup(JSONObject(bytes.toString(Charsets.UTF_8))); "新增 ${result.getInt("added")}，重复 ${result.getInt("duplicate")}，另存冲突 ${result.getInt("conflicts")}。"
                 } }.create().present()
-            else if (requestCode == 101) { val mode = fileMode; val ledger = selected; fileWork {
-                val text = if (mode == 1) store.backup().toString(2) else store.csv(if (mode == 2) ledger else null)
+            else if (requestCode == 101) { fileWork {
+                val text = when (request.mode) {
+                    1 -> store.backup().toString(2)
+                    2 -> store.csv(checkNotNull(request.ledgerId) { "请重新选择导出的账本" })
+                    else -> store.csv(null)
+                }
                 contentResolver.openOutputStream(uri, "wt")!!.bufferedWriter(Charsets.UTF_8).use { it.write(text) }; "文件已保存。"
             } }
         }

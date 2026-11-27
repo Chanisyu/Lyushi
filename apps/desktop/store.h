@@ -31,9 +31,11 @@ public:
     void bindAccount(const QString &userId, const QString &serverId);
     QJsonArray entities(const QString &kind, bool includeDeleted = false) const;
     QJsonObject active() const;
+    /** 账本操作按固定编号读取；可选版本用于拒绝过期的改名与删除确认。 */
+    QJsonObject liveLedger(const QString &id, const QString &expectedVersion = {}) const;
     QString addLedger(const QString &name);
-    void renameLedger(const QString &id, const QString &name);
-    void deleteLedger(const QString &id);
+    void renameLedger(const QString &id, const QString &name, const QString &expectedVersion = {});
+    void deleteLedger(const QString &id, const QString &expectedVersion = {});
     /** 标签采用名称的确定性身份跨端去重；删除保留任务历史快照。 */
     QString addTag(const QString &name);
     void deleteTag(const QString &name);

@@ -74,19 +74,26 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
     /** 使用部分索引读取当前活动，历史记录变多后也不每秒扫描全部记录。 */
     fun active(): JSONObject? = readableDatabase.rawQuery("SELECT payload FROM entities WHERE kind='record' AND json_extract(payload,'$.deleted')=0 AND json_extract(payload,'$.ended') IS NULL ORDER BY json_extract(payload,'$.started') LIMIT 1",null).use { if (it.moveToFirst()) JSONObject(it.getString(0)) else null }
     private fun idle() { check(active() == null) { "请先结束当前记录" } }
+    /** 固定账本编号读取；过期的改名和删除确认在修改事务内拒绝。 */
+    fun liveLedger(id: String, expectedVersion: String? = null): JSONObject {
+        val ledger = find("ledger", id)
+        check(ledger != null && !ledger.getBoolean("deleted")) { "此账本已不存在，请返回并重新选择" }
+        check(expectedVersion == null || ledger.optString("version") == expectedVersion) { "此账本已更新，请重新打开明细后操作" }
+        return ledger
+    }
     /** 账本名称不是身份，同名账本保持独立。 */
     fun addLedger(name: String): String = transaction {
         idle(); check(name.isNotBlank() && name.length <= 200) { "请输入不超过 200 字的账本名" }
         val id = UUID.randomUUID().toString()
         save("ledger", JSONObject().put("id", id).put("name", name.trim()).put("deleted", false).put("revision", 1)); id
     }
-    fun renameLedger(id: String, name: String) = transaction {
+    fun renameLedger(id: String, name: String, expectedVersion: String? = null) = transaction {
         idle(); check(name.isNotBlank() && name.length <= 200) { "请输入不超过 200 字的账本名" }
-        val ledger = checkNotNull(find("ledger", id)); check(!ledger.getBoolean("deleted")); save("ledger", ledger.put("name", name.trim()))
+        val ledger = liveLedger(id, expectedVersion); save("ledger", ledger.put("name", name.trim()))
     }
     /** 整本删除与其记录删除一次提交，其他账本内容保持原样。 */
-    fun deleteLedger(id: String) = transaction {
-        idle(); val ledger = checkNotNull(find("ledger", id))
+    fun deleteLedger(id: String, expectedVersion: String? = null) = transaction {
+        idle(); val ledger = liveLedger(id, expectedVersion)
         entities("record").filter { it.getString("ledgerId") == id }.forEach { save("record", it.put("deleted", true)) }
         save("ledger", ledger.put("deleted", true))
     }
@@ -120,7 +127,7 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
         record.put("ended", ended); validateRecord(record); save("record", record)
     }
     fun edit(id: String?, ledgerId: String, task: String, started: Long, ended: Long, expectedVersion: String? = null, tag: String? = null) = transaction {
-        idle(); val ledger = checkNotNull(find("ledger", ledgerId)); check(!ledger.getBoolean("deleted"))
+        idle(); liveLedger(ledgerId)
         val record = if (id == null) JSONObject().put("id", UUID.randomUUID().toString()).put("deleted", false).put("revision", 1)
             else checkNotNull(find("record", id)) { "记录不存在" }.also { check(!it.getBoolean("deleted") && it.getString("ledgerId") == ledgerId) }
         check(expectedVersion.isNullOrEmpty() || record.optString("version") == expectedVersion) { "记录已被另一设备更新，请保留输入并重新打开修改" }
@@ -276,6 +283,8 @@ internal class Store(context: Context, name: String = "lyushi.sqlite") : SQLiteO
     /** 带 UTF-8 标记及标准 CSV 转义；公式型文本加前缀使表格按文字显示。 */
     fun csv(ledgerId: String?): String {
         idle()
+        // 单账本的文件选择结束后核对原账本，找不到时拒绝导出。
+        if (ledgerId != null) liveLedger(ledgerId)
         fun quote(value: String): String { val safe = if (value.firstOrNull() in listOf('=', '+', '-', '@', '\t', '\r')) "'$value" else value; return "\"${safe.replace("\"", "\"\"")}\"" }
         return buildString {
             append("\uFEFF账本,事项,开始（北京时间）,结束（北京时间）,时长（秒）,记录编号,标签,区间序号,区间类型\r\n")
