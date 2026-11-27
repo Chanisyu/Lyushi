@@ -2,7 +2,8 @@
 'use strict';
 const app=document.querySelector('#app');
 let me=null,csrf='',selected='',tab='records',page=0,view=null,users=[];
-let filters={ledgerId:'',q:'',from:'',to:''};
+const emptyFilters=()=>({ledgerId:'',q:'',from:'',to:''});
+let filters=emptyFilters();
 let viewGeneration=0;
 let waterDay='';
 const tabs={records:'账本记录',water:'饮水记录',tags:'标签',devices:'设备',users:'用户管理',audit:'操作日志',settings:'账户设置',conflicts:'冲突历史'};
@@ -19,7 +20,7 @@ function dialog(title){const d=el('dialog'),body=el('div'),actions=el('div','','
 /** 网页请求使用同源会话与 CSRF 校验；失效会话返回登录页。 */
 async function api(path,body){const requestActor=me?.id,requestCSRF=csrf;const options={credentials:'same-origin',headers:{Accept:'application/json'}};if(body!==undefined){options.method='POST';options.headers['Content-Type']='application/json';options.headers['X-CSRF-Token']=csrf;options.body=JSON.stringify(body)}const response=await fetch('./console/api/'+path,options);const result=await response.json();if(!response.ok){if(response.status===401&&requestActor===me?.id&&requestCSRF===csrf){renderLogin()}throw Error(result.error||'请求未完成')}return result}
 /** 每次操作明确携带目标账户，服务端仍独立验证归属和角色。 */
-async function action(command){return api('action',{userId:selected,...command})}
+async function action(userId,command){return api('action',{...command,userId})}
 /** 所有日期显式使用北京时间，与访问设备时区无关。 */
 function time(ms){return ms==null?'进行中':new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'short',timeStyle:'medium',hour12:false}).format(new Date(ms))}
 function duration(ms){let s=Math.max(0,Math.floor(ms/1000));return `${String(Math.floor(s/3600)).padStart(2,'0')}:${String(Math.floor(s/60)%60).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`}
@@ -28,57 +29,125 @@ function parts(record){return record.segments||[{kind:'focus',started:record.sta
 function effective(record){return parts(record).filter(x=>x.kind==='focus').reduce((sum,x)=>sum+Math.max(0,(x.ended??Date.now())-x.started),0)}
 function localTime(ms){return new Date(ms+8*3600000).toISOString().slice(0,23)}
 function parseTime(input){if(!input.value)throw Error('请填写完整的北京时间');const ms=Date.parse(input.value+'+08:00');if(!Number.isFinite(ms))throw Error('时间格式无效');return ms}
-function tagChoice(parent,value){const label=el('label','标签','field');const values=[['','无标签'],...(view?.tags||[]).map(x=>[x.name,x.name])];if(value&&!values.some(x=>x[0]===value))values.push([value,value+'（已删除）']);const select=optionSelect(values,value||'');label.append(select);parent.append(label);return select}
+function tagChoice(parent,value,tags){const label=el('label','标签','field');const values=[['','无标签'],...tags.map(x=>[x.name,x.name])];if(value&&!values.some(x=>x[0]===value))values.push([value,value+'（已删除）']);const select=optionSelect(values,value||'');label.append(select);parent.append(label);return select}
 function setTag(record,tag){if(tag)record.tag=tag;else delete record.tag}
 
 /* 账户首次登录被限定在改密页面，服务端也独立执行同一限制。 */
 /** 登录表单只在内存读取密码，成功后立即清空输入。 */
-function renderLogin(){viewGeneration++;me=null;csrf='';selected='';tab='records';page=0;view=null;users=[];waterDay='';filters={ledgerId:'',q:'',from:'',to:''};document.querySelectorAll('dialog').forEach(d=>d.remove());app.replaceChildren();const box=el('form','','login');box.append(el('div','柳时','brand'),el('p','管理后台','muted'));const username=field(box,'用户名'),password=field(box,'密码','','password');username.autocomplete='username';password.autocomplete='current-password';const submit=el('button','登录','primary');submit.type='submit';box.append(submit);box.addEventListener('submit',async e=>{e.preventDefault();submit.disabled=true;try{const r=await api('login',{username:username.value,password:password.value});password.value='';document.querySelector('#notice').style.display='none';me=r.user;csrf=r.csrf;selected=me.id;await load()}catch(e){notify(e.message)}finally{submit.disabled=false}});app.append(box)}
-function passwordForm(parent,forced=false){parent.append(el('h2',forced?'设置新密码':'修改本人密码'),el('p','密码至少 12 个字符，且不超过 256 字节。修改后需重新登录。','muted'));const form=el('form');const old=field(form,'原密码','','password'),next=field(form,'新密码','','password'),repeat=field(form,'确认新密码','','password');old.autocomplete='current-password';next.autocomplete=repeat.autocomplete='new-password';const submit=el('button','保存新密码','primary');submit.type='submit';form.append(submit);form.addEventListener('submit',async e=>{e.preventDefault();submit.disabled=true;try{if(next.value!==repeat.value)throw Error('两次新密码不一致');await action({action:'password',userId:me.id,oldPassword:old.value,password:next.value});old.value=next.value=repeat.value='';me=null;csrf='';renderLogin();notify('密码已更新，请重新登录')}catch(e){notify(e.message)}finally{submit.disabled=false}});parent.append(form)}
-/** 按角色读取目标用户的分页数据，不复用上一个账户的视图。 */
-async function load(){
+function renderLogin(){viewGeneration++;me=null;csrf='';selected='';tab='records';page=0;view=null;users=[];waterDay='';filters=emptyFilters();document.querySelectorAll('dialog').forEach(d=>d.remove());app.replaceChildren();const box=el('form','','login');box.append(el('div','柳时','brand'),el('p','管理后台','muted'));const username=field(box,'用户名'),password=field(box,'密码','','password');username.autocomplete='username';password.autocomplete='current-password';const submit=el('button','登录','primary');submit.type='submit';box.append(submit);box.addEventListener('submit',async e=>{e.preventDefault();submit.disabled=true;try{const r=await api('login',{username:username.value,password:password.value});password.value='';document.querySelector('#notice').style.display='none';me=r.user;csrf=r.csrf;selected=me.id;await load()}catch(e){notify(e.message)}finally{submit.disabled=false}});app.append(box)}
+function passwordForm(parent,forced=false){parent.append(el('h2',forced?'设置新密码':'修改本人密码'),el('p','密码至少 12 个字符，且不超过 256 字节。修改后需重新登录。','muted'));const form=el('form');const old=field(form,'原密码','','password'),next=field(form,'新密码','','password'),repeat=field(form,'确认新密码','','password');old.autocomplete='current-password';next.autocomplete=repeat.autocomplete='new-password';const submit=el('button','保存新密码','primary');submit.type='submit';form.append(submit);form.addEventListener('submit',async e=>{e.preventDefault();submit.disabled=true;try{if(next.value!==repeat.value)throw Error('两次新密码不一致');await action(me.id,{action:'password',oldPassword:old.value,password:next.value});old.value=next.value=repeat.value='';me=null;csrf='';renderLogin();notify('密码已更新，请重新登录')}catch(e){notify(e.message)}finally{submit.disabled=false}});parent.append(form)}
+/** 先取得目标账户数据，再同时提交选中账户和页面；加载失败时保留完整的原视图。 */
+async function load(overrides={}){
  if(!me)return renderLogin();
- // 每次载入绑定当前会话和请求代次，退出或换账户后的旧响应不得写入新视图。
  const actorId=me.id,generation=++viewGeneration;
  const current=()=>generation===viewGeneration&&me?.id===actorId;
  if(me.mustChangePassword){app.replaceChildren();const box=el('section','','login');box.append(el('div','柳时','brand'));passwordForm(box,true);app.append(box);return}
- if(me.role==='admin'){const next=await api('users');if(!current())return;users=next.users;if(!users.some(x=>x.user.id===selected))selected=me.id}else selected=me.id;
- if(tab==='water'){
-  const next=await api('water?'+new URLSearchParams({userId:selected,day:waterDay,page}));
+ const next={selected,tab,page,filters,waterDay,...overrides};
+ let nextUsers=[],nextView=null;
+ if(me.role==='admin'){
+  nextUsers=(await api('users')).users;
   if(!current())return;
-  view=next;
- }else if(tab!=='users'&&tab!=='audit'&&tab!=='settings'){const kind=tab==='records'?'record':tab==='tags'?'tag':tab==='conflicts'?'conflict':'record';const query=new URLSearchParams({userId:selected,kind,page,...filters});const next=await api('state?'+query);if(!current())return;view=next}
+  if(!nextUsers.some(x=>x.user.id===next.selected))Object.assign(next,{selected:actorId,page:0,filters:emptyFilters(),waterDay:''});
+ }else next.selected=actorId;
+ if(next.tab==='water'){
+  nextView=await api('water?'+new URLSearchParams({userId:next.selected,day:next.waterDay,page:next.page}));
+ }else if(!['users','audit','settings'].includes(next.tab)){
+  const kind=next.tab==='tags'?'tag':next.tab==='conflicts'?'conflict':'record';
+  nextView=await api('state?'+new URLSearchParams({userId:next.selected,kind,page:next.page,...next.filters}));
+ }
  if(!current())return;
+ ({selected,tab,page,filters,waterDay}=next);
+ users=nextUsers;view=nextView;
  renderShell();const content=document.querySelector('.content');if(tab==='records')renderRecords(content);else if(tab==='water')renderWater(content);else if(tab==='tags')renderTags(content);else if(tab==='devices')renderDevices(content);else if(tab==='users')renderUsers(content);else if(tab==='audit')await renderAudit(content);else if(tab==='conflicts')renderConflicts(content);else renderSettings(content)
 }
+function openAccount(userId,nextTab=tab){return load({selected:userId,tab:nextTab,page:0,filters:emptyFilters(),waterDay:''})}
 /** 管理员可切换查看目标账户，普通用户仅显示自己的空间。 */
-function renderShell(){app.replaceChildren();const header=el('header');header.append(el('div','柳时','brand'),el('span','管理后台','muted'),el('div','','spacer'));const account=el('div','','account');if(me.role==='admin'){account.append(el('span','查看账户','muted'));const select=optionSelect(users.map(x=>[x.user.id,x.user.displayName+' · '+x.user.username+(x.user.enabled?'':'（已停用）')]),selected);select.addEventListener('change',()=>{selected=select.value;page=0;filters={ledgerId:'',q:'',from:'',to:''};load().catch(e=>notify(e.message))});account.append(select)}else account.append(el('span',me.displayName));account.append(button('退出',async()=>{await action({action:'logout',userId:me.id});me=null;csrf='';renderLogin()}));header.append(account);const layout=el('div','','layout'),nav=el('nav');for(const [id,name]of Object.entries(tabs)){if((id==='users'||id==='audit')&&me.role!=='admin')continue;nav.append(button(name,async()=>{tab=id;page=0;await load()},id===tab?'selected':''))}const content=el('section','','content');layout.append(nav,content);app.append(header,layout)}
+function renderShell(){
+ app.replaceChildren();
+ const header=el('header'),account=el('div','','account');
+ header.append(el('div','柳时','brand'),el('span','管理后台','muted'),el('div','','spacer'));
+ if(me.role==='admin'){
+  account.append(el('span','查看账户','muted'));
+  const select=optionSelect(users.map(x=>[x.user.id,x.user.displayName+' · '+x.user.username+(x.user.enabled?'':'（已停用）')]),selected);
+  select.addEventListener('change',async()=>{
+   const requested=select.value;
+   // 选择框始终显示当前内容所属账户，待新账户页面可用后再显示新选择。
+   select.value=selected;select.disabled=true;
+   try{await openAccount(requested)}catch(e){notify(e.message)}finally{select.disabled=false}
+  });
+  account.append(select);
+ }else account.append(el('span',me.displayName));
+ account.append(button('退出',async()=>{await action(me.id,{action:'logout'});me=null;csrf='';renderLogin()}));
+ header.append(account);
+ const layout=el('div','','layout'),nav=el('nav');
+ for(const [id,name]of Object.entries(tabs)){
+  if((id==='users'||id==='audit')&&me.role!=='admin')continue;
+  nav.append(button(name,()=>load({tab:id,page:0}),id===tab?'selected':''));
+ }
+ const content=el('section','','content');layout.append(nav,content);app.append(header,layout);
+}
 /** 宽表允许横向滚动，业务文字使用文本节点展示。 */
 function table(parent,headers){const wrap=el('div','','panel table-scroll'),t=el('table'),head=el('tr');if(headers.length>=4)t.className='wide';wrap.tabIndex=0;wrap.setAttribute('aria-label','数据表格，可横向滚动');headers.forEach(x=>head.append(el('th',x)));const thead=el('thead');thead.append(head);const body=el('tbody');t.append(thead,body);wrap.append(t);parent.append(wrap);return body}
 function row(body,values){const tr=el('tr');for(const value of values){const td=el('td');if(value instanceof Node)td.append(value);else td.textContent=value??'';tr.append(td)}body.append(tr);return tr}
-function pager(parent,total){const bar=el('div','','pagination');const prev=button('上一页',async()=>{page--;await load()}),next=button('下一页',async()=>{page++;await load()});prev.disabled=page===0;next.disabled=(page+1)*50>=total;bar.append(prev,el('span',`第 ${page+1} 页 · 共 ${total} 项`,'muted'),next);parent.append(bar)}
+function pager(parent,total){const bar=el('div','','pagination');const prev=button('上一页',()=>load({page:page-1})),next=button('下一页',()=>load({page:page+1}));prev.disabled=page===0;next.disabled=(page+1)*50>=total;bar.append(prev,el('span',`第 ${page+1} 页 · 共 ${total} 项`,'muted'),next);parent.append(bar)}
 function controls(...buttons){const n=el('div','','toolbar');n.append(...buttons);return n}
-function labelOf(book){return view.ledgers.find(x=>x.id===book)?.name||'已删除账本'}
 /** 先完成保存及刷新再关闭弹窗，防止快速连续操作读取旧列表。 */
 function namedDialog(title,label,save){const d=dialog(title),input=field(d.body,label);d.actions.append(button('保存',async()=>{if(!input.value.trim())throw Error('内容不能为空');await save(input.value.trim());await load();d.close()},'primary'));input.focus()}
-async function saveNamed(kind,entity){const d=dialog(kind==='ledger'?'账本改名':'修改标签');const input=field(d.body,'名称',entity.name);d.actions.append(button('保存',async()=>{await action({action:'save',kind,entity:{...entity,name:input.value},expectedVersion:entity.version});await load();d.close()},'primary'))}
-async function deleteEntity(kind,entity){const name=kind==='record'?entity.task:entity.name;let confirmation=name;if(kind==='ledger'){confirmation=prompt(`删除账本将同时删除全部任务及分心区间。请输入账本名称“${name}”：`);if(confirmation===null)return}else if(!confirm(`确认删除${kind==='record'?'整个任务及其全部区间':'标签'}“${name}”？`))return;await action({action:'delete',kind,id:entity.id,expectedVersion:entity.version,confirmation});await load()}
+async function saveNamed(userId,kind,entity){const d=dialog(kind==='ledger'?'账本改名':'修改标签');const input=field(d.body,'名称',entity.name);d.actions.append(button('保存',async()=>{await action(userId,{action:'save',kind,entity:{...entity,name:input.value},expectedVersion:entity.version});await load();d.close()},'primary'))}
+async function deleteEntity(userId,kind,entity){const name=kind==='record'?entity.task:entity.name;let confirmation=name;if(kind==='ledger'){confirmation=prompt(`删除账本将同时删除全部任务及分心区间。请输入账本名称“${name}”：`);if(confirmation===null)return}else if(!confirm(`确认删除${kind==='record'?'整个任务及其全部区间':'标签'}“${name}”？`))return;await action(userId,{action:'delete',kind,id:entity.id,expectedVersion:entity.version,confirmation});await load()}
 
 /* 编辑专注元数据与各区间时间，提交前只改本地副本；服务端再次校验版本和完整时间线。 */
 /** 编辑完整任务副本，专注元数据统一，分心与时间区间分别保存。 */
-function recordDialog(record=null,segmentsOnly=false){const data=record?structuredClone(record):{id:crypto.randomUUID(),ledgerId:filters.ledgerId||view.ledgers[0]?.id,task:'',started:Date.now()-60000,ended:Date.now(),deleted:false,revision:1};if(!data.ledgerId){notify('请先新建账本');return}const d=dialog(segmentsOnly?'分段明细':'任务记录');if(record?.ended===null){d.body.append(el('p','进行中的任务只读，请在客户端结束后修改。','muted'));for(const p of parts(record))d.body.append(el('p',`${p.kind==='focus'?'专注 · '+record.task:'分心 · '+p.task}　${time(p.started)} → ${time(p.ended)}`));return}
- const name=field(d.body,'原任务事项',data.task);const tag=tagChoice(d.body,data.tag);const section=el('div');d.body.append(section);const inputs=[];
- for(const [i,p]of parts(data).entries()){const box=el('div','','segment');box.append(el('h3',`${i+1} · ${p.kind==='focus'?'专注':'分心'}`));const entry={part:p};if(p.kind==='distraction'){entry.task=field(box,'分心事项',p.task);entry.tag=tagChoice(box,p.tag)}const grid=el('div','','grid');entry.start=field(grid,'开始（北京时间）',localTime(p.started),'datetime-local');entry.end=field(grid,'结束（北京时间）',localTime(p.ended),'datetime-local');entry.start.step=entry.end.step='0.001';box.append(grid);section.append(box);inputs.push(entry)}
- d.actions.append(button('保存',async()=>{data.task=name.value.trim();setTag(data,tag.value);if(!data.task)throw Error('事项不能为空');const changed=inputs.map(x=>{const p={...x.part,started:parseTime(x.start),ended:parseTime(x.end)};if(p.kind==='distraction'){p.task=x.task.value.trim();setTag(p,x.tag.value)}return p});if(data.segments)data.segments=changed;data.started=changed[0].started;data.ended=changed.at(-1).ended;await action({action:'save',kind:'record',entity:data,expectedVersion:record?.version||''});await load();d.close()},'primary'))
+function recordDialog(current,ledgerId,record=null,segmentsOnly=false){const data=record?structuredClone(record):{id:crypto.randomUUID(),ledgerId:ledgerId||current.ledgers[0]?.id,task:'',started:Date.now()-60000,ended:Date.now(),deleted:false,revision:1};if(!data.ledgerId){notify('请先新建账本');return}const d=dialog(segmentsOnly?'分段明细':'任务记录');if(record?.ended===null){d.body.append(el('p','进行中的任务只读，请在客户端结束后修改。','muted'));for(const p of parts(record))d.body.append(el('p',`${p.kind==='focus'?'专注 · '+record.task:'分心 · '+p.task}　${time(p.started)} → ${time(p.ended)}`));return}
+ const name=field(d.body,'原任务事项',data.task);const tag=tagChoice(d.body,data.tag,current.tags);const section=el('div');d.body.append(section);const inputs=[];
+ for(const [i,p]of parts(data).entries()){const box=el('div','','segment');box.append(el('h3',`${i+1} · ${p.kind==='focus'?'专注':'分心'}`));const entry={part:p};if(p.kind==='distraction'){entry.task=field(box,'分心事项',p.task);entry.tag=tagChoice(box,p.tag,current.tags)}const grid=el('div','','grid');entry.start=field(grid,'开始（北京时间）',localTime(p.started),'datetime-local');entry.end=field(grid,'结束（北京时间）',localTime(p.ended),'datetime-local');entry.start.step=entry.end.step='0.001';box.append(grid);section.append(box);inputs.push(entry)}
+ d.actions.append(button('保存',async()=>{data.task=name.value.trim();setTag(data,tag.value);if(!data.task)throw Error('事项不能为空');const changed=inputs.map(x=>{const p={...x.part,started:parseTime(x.start),ended:parseTime(x.end)};if(p.kind==='distraction'){p.task=x.task.value.trim();setTag(p,x.tag.value)}return p});if(data.segments)data.segments=changed;data.started=changed[0].started;data.ended=changed.at(-1).ended;await action(current.user.id,{action:'save',kind:'record',entity:data,expectedVersion:record?.version||''});await load();d.close()},'primary'))
 }
 /** 先检查认证和导出结果，再生成本机下载，不把错误 JSON 当作备份。 */
-async function download(format){const query=new URLSearchParams({userId:selected,format,ledgerId:filters.ledgerId});const response=await fetch('./console/api/export?'+query,{credentials:'same-origin'});if(!response.ok){const r=await response.json();throw Error(r.error)}const url=URL.createObjectURL(await response.blob()),a=el('a');a.href=url;a.download=format==='csv'?'柳时时间记录.csv':'柳时备份.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+async function download(userId,format,ledgerId){const query=new URLSearchParams({userId,format,ledgerId});const response=await fetch('./console/api/export?'+query,{credentials:'same-origin'});if(!response.ok){const r=await response.json();throw Error(r.error)}const url=URL.createObjectURL(await response.blob()),a=el('a');a.href=url;a.download=format==='csv'?'柳时时间记录.csv':'柳时备份.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+/** 文件读取可能跨越页面切换，确认提示和上传请求须使用同一目标账户。 */
+function importBackup(user){
+ const input=el('input');input.type='file';input.accept='.json,application/json';
+ input.addEventListener('change',async()=>{
+  try{
+   const file=input.files[0];if(!file)return;
+   if(file.size>8*1024*1024)throw Error('网页导入上限为 8 MiB；较大备份请使用客户端导入');
+   const backup=JSON.parse(await file.text());
+   if(selected!==user.id)throw Error('查看账户已切换，请重新选择备份文件');
+   if(!confirm(`将合并导入“${user.displayName}”的账户。重复数据去重，不同版本另存为冲突。继续？`))return;
+   const result=await action(user.id,{action:'import',backup});
+   notify(`导入完成：新增 ${result.added}，重复 ${result.duplicate}，冲突 ${result.conflicts}`);
+   await load();
+  }catch(e){notify(e.message)}
+ });
+ input.click();
+}
 /** 筛选、补记和备份入口均指向已授权账户，不影响客户端计时。 */
-function renderRecords(parent){parent.append(el('h1','账本记录'),el('p','起止时间固定为北京时间；有效时长仅累计专注区间。','muted'));const bar=el('div','','toolbar');const ledger=optionSelect([['','全部账本'],...view.ledgers.map(x=>[x.id,x.name])],filters.ledgerId),search=el('input');search.placeholder='搜索事项或标签';search.value=filters.q;const from=el('input'),to=el('input');from.type=to.type='date';from.value=filters.from;to.value=filters.to;bar.append(ledger,search,from,to,button('筛选',async()=>{filters={ledgerId:ledger.value,q:search.value,from:from.value,to:to.value};page=0;await load()}));parent.append(bar);
- const actions=controls(button('新建账本',()=>namedDialog('新建账本','账本名称',name=>action({action:'save',kind:'ledger',entity:{id:crypto.randomUUID(),name,deleted:false,revision:1}})),'primary'),button('补记',()=>recordDialog()),button('导出 JSON',()=>download('json')),button('导出 CSV',()=>download('csv')),button('导入 JSON',async()=>{const input=el('input');input.type='file';input.accept='.json,application/json';input.addEventListener('change',async()=>{try{const file=input.files[0];if(!file)return;if(file.size>8*1024*1024)throw Error('网页导入上限为 8 MiB；较大备份请使用客户端导入');const backup=JSON.parse(await file.text());if(!confirm(`将合并导入“${view.user.displayName}”的账户。重复数据去重，不同版本另存为冲突。继续？`))return;const result=await action({action:'import',backup});notify(`导入完成：新增 ${result.added}，重复 ${result.duplicate}，冲突 ${result.conflicts}`);await load()}catch(e){notify(e.message)}});input.click()}));parent.append(actions);
- if(filters.ledgerId){const book=view.ledgers.find(x=>x.id===filters.ledgerId);if(book)parent.append(controls(button('账本改名',()=>saveNamed('ledger',book)),button('删除账本',()=>deleteEntity('ledger',book),'danger')))}
- if(view.hasActive)parent.append(el('p','该账户有任务正在计时，导入导出须在计时结束后进行。','muted'));
- const body=table(parent,['事项 / 账本','标签','起止时间','有效时长','操作']);for(const record of view.items){const buttons=controls(button(record.ended===null?'查看状态':'修改',()=>recordDialog(record)),button('分段明细',()=>recordDialog(record,true)));if(record.ended!==null)buttons.append(button('删除',()=>deleteEntity('record',record),'danger'));row(body,[record.task+'\n'+labelOf(record.ledgerId),record.tag||'无标签',time(record.started)+'\n'+time(record.ended),duration(effective(record)),buttons])}if(!view.items.length)parent.append(el('p','暂无记录','empty'));pager(parent,view.total)
+function renderRecords(parent){
+ const current=view,{id:userId}=current.user,ledgerId=filters.ledgerId;
+ parent.append(el('h1','账本记录'),el('p','起止时间固定为北京时间；有效时长仅累计专注区间。','muted'));
+ const bar=el('div','','toolbar');
+ const ledger=optionSelect([['','全部账本'],...current.ledgers.map(x=>[x.id,x.name])],ledgerId),search=el('input');
+ search.placeholder='搜索事项或标签';search.value=filters.q;
+ const from=el('input'),to=el('input');from.type=to.type='date';from.value=filters.from;to.value=filters.to;
+ bar.append(ledger,search,from,to,button('筛选',()=>load({filters:{ledgerId:ledger.value,q:search.value,from:from.value,to:to.value},page:0})));parent.append(bar);
+ parent.append(controls(
+  button('新建账本',()=>namedDialog('新建账本','账本名称',name=>action(userId,{action:'save',kind:'ledger',entity:{id:crypto.randomUUID(),name,deleted:false,revision:1}})),'primary'),
+  button('补记',()=>recordDialog(current,ledgerId)),button('导出 JSON',()=>download(userId,'json',ledgerId)),
+  button('导出 CSV',()=>download(userId,'csv',ledgerId)),button('导入 JSON',()=>importBackup(current.user))
+ ));
+ const book=current.ledgers.find(x=>x.id===ledgerId);
+ if(book)parent.append(controls(button('账本改名',()=>saveNamed(userId,'ledger',book)),button('删除账本',()=>deleteEntity(userId,'ledger',book),'danger')));
+ if(current.hasActive)parent.append(el('p','该账户有任务正在计时，导入导出须在计时结束后进行。','muted'));
+ const body=table(parent,['事项 / 账本','标签','起止时间','有效时长','操作']);
+ for(const record of current.items){
+  const buttons=controls(button(record.ended===null?'查看状态':'修改',()=>recordDialog(current,ledgerId,record)),button('分段明细',()=>recordDialog(current,ledgerId,record,true)));
+  if(record.ended!==null)buttons.append(button('删除',()=>deleteEntity(userId,'record',record),'danger'));
+  const bookName=current.ledgers.find(x=>x.id===record.ledgerId)?.name||'已删除账本';
+  row(body,[record.task+'\n'+bookName,record.tag||'无标签',time(record.started)+'\n'+time(record.ended),duration(effective(record)),buttons]);
+ }
+ if(!current.items.length)parent.append(el('p','暂无记录','empty'));
+ pager(parent,current.total);
 }
 /** 保存时绑定打开表单的目标账户及历史版本，防止重新载入后误操作其他账户。 */
 function editWater(userId,entry){
@@ -104,8 +173,8 @@ function renderWater(parent){
  const b=current.bottle;
  if(b?.capacity)parent.append(el('p',`水壶剩余 ${b.ml} / ${b.capacity} mL`,'muted'));
  const filters=el('div','','toolbar'),day=field(filters,'日期（北京时间）',current.day,'date');
- day.addEventListener('change',()=>{waterDay=day.value;page=0;load().catch(e=>notify(e.message))});
- filters.append(button('今天',async()=>{waterDay='';page=0;await load()}),button('补记饮水',()=>editWater(userId),'primary'));
+ day.addEventListener('change',()=>load({waterDay:day.value,page:0}).catch(e=>notify(e.message)));
+ filters.append(button('今天',()=>load({waterDay:'',page:0})),button('补记饮水',()=>editWater(userId),'primary'));
  parent.append(filters);
  const names={fill:'加水',drink:'喝水',pour:'倒水',manual:'补记'};
  const body=table(parent,['时间（北京时间）','类型','水量','状态','操作']);
@@ -123,18 +192,65 @@ function renderWater(parent){
  if(!current.items.length)parent.append(el('p','当天暂无记录','empty'));
  pager(parent,current.total);
 }
-function renderTags(parent){parent.append(el('h1','标签'),el('p','标签由本账户各账本共用。删除候选项保留任务中的历史名称。','muted'));parent.append(controls(button('新增标签',()=>namedDialog('新增标签','标签名称',name=>action({action:'save',kind:'tag',entity:{name,deleted:false,revision:1}})),'primary')));const body=table(parent,['标签名称','操作']);for(const tag of view.items)row(body,[tag.name,controls(button('删除',()=>deleteEntity('tag',tag),'danger'))]);pager(parent,view.total)}
+function renderTags(parent){const userId=view.user.id;parent.append(el('h1','标签'),el('p','标签由本账户各账本共用。删除候选项保留任务中的历史名称。','muted'));parent.append(controls(button('新增标签',()=>namedDialog('新增标签','标签名称',name=>action(userId,{action:'save',kind:'tag',entity:{name,deleted:false,revision:1}})),'primary')));const body=table(parent,['标签名称','操作']);for(const tag of view.items)row(body,[tag.name,controls(button('删除',()=>deleteEntity(userId,'tag',tag),'danger'))]);pager(parent,view.total)}
 function secretDialog(title,secret){const d=dialog(title);d.body.append(el('p','以下内容仅本次显示，请妥善保存。关闭后不能再次查看原文。','muted'),el('pre',secret,'secret'));d.actions.replaceChildren(button('复制',async()=>{await navigator.clipboard.writeText(secret);notify('已复制')}),button('已保存，关闭',d.close,'primary'))}
 /** 一次性显示生成或轮换后的设备密钥，撤销需要明确确认。 */
-function renderDevices(parent){parent.append(el('h1','设备'),el('p','每台设备使用独立密钥，填写到客户端设置后启用同步。最多十台有效设备。','muted'));parent.append(controls(button('添加设备',()=>namedDialog('添加设备','设备名称',async label=>{const r=await action({action:'create_device',label});secretDialog('设备密钥',r.key)}),'primary')));const body=table(parent,['设备名称','状态','最后同步（北京时间）','操作']);for(const device of view.devices){const actions=controls();if(!device.revoked)actions.append(button('重置密钥',async()=>{if(!confirm('重置后旧密钥立即失效，是否继续？'))return;const r=await action({action:'rotate_device',id:device.id});secretDialog('新设备密钥',r.key);await load()}),button('撤销',async()=>{if(!confirm(`撤销设备“${device.label}”的同步权限？`))return;await action({action:'revoke_device',id:device.id});await load()},'danger'));row(body,[device.label,device.revoked?'已撤销':'有效',device.lastSync?time(device.lastSync):'尚未同步',actions])}}
+function renderDevices(parent){
+ const userId=view.user.id;
+ parent.append(el('h1','设备'),el('p','每台设备使用独立密钥，填写到客户端设置后启用同步。最多十台有效设备。','muted'));
+ parent.append(controls(button('添加设备',()=>namedDialog('添加设备','设备名称',async label=>{
+  const r=await action(userId,{action:'create_device',label});secretDialog('设备密钥',r.key);
+ }),'primary')));
+ const body=table(parent,['设备名称','状态','最后同步（北京时间）','操作']);
+ for(const device of view.devices){
+  const actions=controls();
+  if(!device.revoked)actions.append(button('重置密钥',async()=>{
+   if(!confirm('重置后旧密钥立即失效，是否继续？'))return;
+   const r=await action(userId,{action:'rotate_device',id:device.id});secretDialog('新设备密钥',r.key);await load();
+  }),button('撤销',async()=>{
+   if(!confirm(`撤销设备“${device.label}”的同步权限？`))return;
+   await action(userId,{action:'revoke_device',id:device.id});await load();
+  },'danger'));
+  row(body,[device.label,device.revoked?'已撤销':'有效',device.lastSync?time(device.lastSync):'尚未同步',actions]);
+ }
+}
 /** 普通用户创建、停用、重置密码与彻底删除集中由管理员执行。 */
-function renderUsers(parent){parent.append(el('h1','用户管理'),el('p','管理员可查看和管理所有账户。停用会使会话及设备权限失效；重新启用后需新建设备密钥。','muted'));parent.append(controls(button('创建用户',()=>{const d=dialog('创建普通用户'),username=field(d.body,'用户名（3—32 位字母、数字或 . _ -）'),name=field(d.body,'显示名称');d.actions.append(button('创建',async()=>{const r=await action({action:'create_user',username:username.value,displayName:name.value});d.close();secretDialog('临时密码 · '+r.user.username,r.temporaryPassword);await load()},'primary'))},'primary')));const body=table(parent,['账户','使用情况','最后同步','操作']);for(const item of users){const u=item.user,actions=controls(button('查看数据',async()=>{selected=u.id;tab='records';page=0;filters={ledgerId:'',q:'',from:'',to:''};await load()}),button('修改名称',()=>{const d=dialog('修改账户显示名称'),name=field(d.body,'显示名称',u.displayName);d.actions.append(button('保存',async()=>{await action({action:'profile',userId:u.id,displayName:name.value});await load();d.close()},'primary'))}));if(u.role!=='admin')actions.append(button('重置密码',async()=>{if(!confirm(`重置“${u.username}”的密码并使网页会话失效？`))return;const r=await action({action:'reset_password',userId:u.id});secretDialog('临时密码 · '+u.username,r.temporaryPassword)}),button(u.enabled?'停用':'启用',async()=>{if(!confirm(`确认${u.enabled?'停用':'启用'}“${u.username}”？`))return;await action({action:'user_status',userId:u.id,enabled:!u.enabled});await load()}),button('彻底删除',async()=>{const confirmation=prompt(`永久删除“${u.username}”的服务器业务数据及同步历史。离线副本和既有备份不随此操作清除。请输入用户名：`);if(confirmation===null)return;await action({action:'delete_user',userId:u.id,confirmation});if(selected===u.id)selected=me.id;await load()},'danger'));row(body,[u.displayName+'\n'+u.username+' · '+(u.role==='admin'?'管理员':u.enabled?'普通用户':'已停用'),`${item.ledgerCount} 个账本 / ${item.recordCount} 个任务 / ${item.deviceCount} 台设备${item.hasActive?'\n正在计时':''}`,item.lastSync?time(item.lastSync):'尚未同步',actions])}}
+function renderUsers(parent){
+ const actorId=me.id;
+ parent.append(el('h1','用户管理'),el('p','管理员可查看和管理所有账户。停用会使会话及设备权限失效；重新启用后需新建设备密钥。','muted'));
+ parent.append(controls(button('创建用户',()=>{
+  const d=dialog('创建普通用户'),username=field(d.body,'用户名（3—32 位字母、数字或 . _ -）'),name=field(d.body,'显示名称');
+  d.actions.append(button('创建',async()=>{
+   const r=await action(actorId,{action:'create_user',username:username.value,displayName:name.value});
+   d.close();secretDialog('临时密码 · '+r.user.username,r.temporaryPassword);await load();
+  },'primary'));
+ },'primary')));
+ const body=table(parent,['账户','使用情况','最后同步','操作']);
+ for(const item of users){
+  const u=item.user,actions=controls(button('查看数据',()=>openAccount(u.id,'records')),button('修改名称',()=>{
+   const d=dialog('修改账户显示名称'),name=field(d.body,'显示名称',u.displayName);
+   d.actions.append(button('保存',async()=>{await action(u.id,{action:'profile',displayName:name.value});await load();d.close()},'primary'));
+  }));
+  if(u.role!=='admin')actions.append(button('重置密码',async()=>{
+   if(!confirm(`重置“${u.username}”的密码并使网页会话失效？`))return;
+   const r=await action(u.id,{action:'reset_password'});secretDialog('临时密码 · '+u.username,r.temporaryPassword);
+  }),button(u.enabled?'停用':'启用',async()=>{
+   if(!confirm(`确认${u.enabled?'停用':'启用'}“${u.username}”？`))return;
+   await action(u.id,{action:'user_status',enabled:!u.enabled});await load();
+  }),button('彻底删除',async()=>{
+   const confirmation=prompt(`永久删除“${u.username}”的服务器业务数据及同步历史。离线副本和既有备份不随此操作清除。请输入用户名：`);
+   if(confirmation===null)return;
+   await action(u.id,{action:'delete_user',confirmation});await load();
+  },'danger'));
+  row(body,[u.displayName+'\n'+u.username+' · '+(u.role==='admin'?'管理员':u.enabled?'普通用户':'已停用'),`${item.ledgerCount} 个账本 / ${item.recordCount} 个任务 / ${item.deviceCount} 台设备${item.hasActive?'\n正在计时':''}`,item.lastSync?time(item.lastSync):'尚未同步',actions]);
+ }
+}
 /** 分页展示审计元信息，保留期由服务端执行。 */
 async function renderAudit(parent){parent.append(el('h1','操作日志'),el('p','记录近 180 天的账户、设备及业务变更，不包含密码和设备密钥原文。','muted'));const data=await api('audit?page='+page),body=table(parent,['时间','操作人','目标账户','操作','对象']);const names={login:'登录',login_failed:'登录失败',create_user:'创建用户',delete_user:'删除用户',user_status:'修改账户状态',reset_password:'重置密码',change_password:'修改密码',create_device:'创建设备',rotate_device:'重置设备密钥',revoke_device:'撤销设备',save_record:'保存任务',save_ledger:'保存账本',save_tag:'保存标签',delete_record:'删除任务',delete_ledger:'删除账本',delete_tag:'删除标签',import_backup:'导入备份',water_manual:'补记饮水',water_correct:'更正饮水',water_void:'作废饮水',profile:'修改账户名称'};for(const item of data.items)row(body,[time(item.at),item.actor||'未登录',item.target,names[item.action]||item.action,item.objectId]);const bar=controls(button('上一页',async()=>{page=Math.max(0,page-1);await load()}),button('下一页',async()=>{if(data.items.length===50){page++;await load()}}));parent.append(bar)}
 /** 只读展示完整冲突分段，不提供重启计时或强制覆盖入口。 */
 function renderConflicts(parent){parent.append(el('h1','冲突历史'),el('p','以下为保留的不同版本，查看不会恢复计时，也不会覆盖当前任务。','muted'));for(const content of view.items){const entity=content.entity,box=el('div','','panel conflict');if(content.kind==='record'){box.append(el('h3',entity.task),el('p',`标签：${entity.tag||'无标签'}　${entity.deleted?'删除状态':''}`));for(const p of parts(entity))box.append(el('p',`${p.kind==='focus'?'专注 · '+entity.task:'分心 · '+p.task}\n${time(p.started)} → ${time(p.ended)}${p.ended===null?'（存档）':''}`))}else box.append(el('h3',entity.name),el('p',entity.deleted?'删除状态':'历史版本'));parent.append(box)}if(!view.items.length)parent.append(el('p','暂无冲突历史','empty'));pager(parent,view.total)}
 /** 本人密码修改不受管理员当前查看账户选择的影响。 */
-function renderSettings(parent){parent.append(el('h1','账户设置'));const panel=el('section','','panel');panel.append(el('p','用户名：'+me.username,'muted'));const name=field(panel,'本人显示名称',me.displayName);panel.append(button('保存名称',async()=>{await action({action:'profile',userId:me.id,displayName:name.value});me=(await api('me')).user;await load()},'primary'));parent.append(panel);const password=el('section','','panel');passwordForm(password);parent.append(password)}
+function renderSettings(parent){const userId=me.id;parent.append(el('h1','账户设置'));const panel=el('section','','panel');panel.append(el('p','用户名：'+me.username,'muted'));const name=field(panel,'本人显示名称',me.displayName);panel.append(button('保存名称',async()=>{await action(userId,{action:'profile',displayName:name.value});me=(await api('me')).user;await load()},'primary'));parent.append(panel);const password=el('section','','panel');passwordForm(password);parent.append(password)}
 // 页面轮询仅在前台且无编辑弹窗时执行；读秒及表单输入不会逐字或逐帧发送到服务器。
 setInterval(()=>{if(me&&!me.mustChangePassword&&!document.hidden&&!document.querySelector('dialog')&&tab==='records')load().catch(e=>notify(e.message))},15000);
 (async()=>{try{const r=await api('me');me=r.user;csrf=r.csrf;selected=me.id;await load()}catch{renderLogin()}})();
